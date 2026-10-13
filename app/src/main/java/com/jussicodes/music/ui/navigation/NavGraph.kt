@@ -7,6 +7,7 @@ import androidx.compose.animation.SharedTransitionLayout
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -15,8 +16,6 @@ import androidx.compose.foundation.pager.PagerState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.foundation.background
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -29,7 +28,6 @@ import com.jussicodes.music.constants.DURATION_ENTER
 import com.jussicodes.music.constants.DURATION_EXIT_SHORT
 import com.jussicodes.music.constants.EmphasizedAccelerateEasing
 import com.jussicodes.music.constants.EmphasizedDecelerateEasing
-import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.ui.screen.AlbumScreen
 import com.jussicodes.music.ui.screen.AlbumSublistScreen
 import com.jussicodes.music.ui.screen.ArtistScreen
@@ -37,6 +35,7 @@ import com.jussicodes.music.ui.screen.CloudSongScreen
 import com.jussicodes.music.ui.screen.ExploreScreen
 import com.jussicodes.music.ui.screen.LibraryScreen
 import com.jussicodes.music.ui.screen.LoginScreen
+import com.jussicodes.music.ui.screen.LxPluginScreen
 import com.jussicodes.music.ui.screen.MessagesScreen
 import com.jussicodes.music.ui.screen.PlaylistScreen
 import com.jussicodes.music.ui.screen.PrivateChatScreen
@@ -56,7 +55,6 @@ import com.jussicodes.music.viewModel.UserFollowType
 fun NavGraph(
     navController: NavHostController,
     bottomPadding: Dp,
-    showMiniPlayer: Boolean,
     homePagerState: PagerState,
     onHomePageChange: (Int) -> Unit,
     onHomePageScroll: (Float) -> Unit
@@ -77,8 +75,7 @@ fun NavGraph(
             navController = navController,
             startDestination = Screen.Library.route,
             Modifier
-                .background(MaterialTheme.colorScheme.background)
-                .windowInsetsPadding(WindowInsets(bottom = bottomPadding + if (showMiniPlayer) MiniPlayerHeight else 0.dp)),
+                .windowInsetsPadding(WindowInsets(bottom = bottomPadding)),
             enterTransition = {
                 if (targetState.destination.route in homeRoutes) {
                     EnterTransition.None
@@ -161,6 +158,7 @@ fun NavGraph(
             composable(Screen.Login.route) { LoginScreen(navController = navController) }
             composable(Screen.Messages.route) { MessagesScreen(navController = navController) }
             composable(Screen.Search.route) { SearchScreen(navController = navController) }
+            composable(Screen.LxPlugins.route) { LxPluginScreen(navController = navController) }
             composable<PlaylistNav> {
                 PlaylistScreen(
                     navController = navController,
@@ -248,16 +246,18 @@ private fun HomePager(
             .collect(onPageScroll)
     }
 
-    HorizontalPager(
-        state = pagerState,
-        flingBehavior = PagerDefaults.flingBehavior(
+    Box {
+        HorizontalPager(
             state = pagerState,
-            snapPositionalThreshold = 0.5f
-        )
-    ) { page ->
-        when (page) {
-            0 -> LibraryScreen(navController = navController)
-            1 -> ExploreScreen(navController = navController)
+            flingBehavior = PagerDefaults.flingBehavior(
+                state = pagerState,
+                snapPositionalThreshold = 0.5f
+            )
+        ) { page ->
+            when (page) {
+                0 -> LibraryScreen(navController = navController)
+                1 -> ExploreScreen(navController = navController)
+            }
         }
     }
 }

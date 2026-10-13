@@ -62,6 +62,7 @@ import coil3.compose.AsyncImage
 import com.jussicodes.music.LocalPlayerController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MediaSessionConstants
+import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.R
 import com.jussicodes.music.constants.ThumbnailCornerRadius
 import com.jussicodes.music.data.PinnedAlbumStore
@@ -81,6 +82,7 @@ import com.jussicodes.music.ui.icons.ModeComment
 import com.jussicodes.music.ui.icons.PushPin
 import com.jussicodes.music.ui.icons.PushPinFill
 import com.jussicodes.music.ui.navigation.ArtistNav
+import com.jussicodes.music.ui.navigation.UserNav
 import com.jussicodes.music.utils.CoverImageSize
 import com.jussicodes.music.utils.formatTimestamp
 import com.jussicodes.music.utils.toCoverImageUrl
@@ -106,6 +108,8 @@ fun AlbumScreen(
     val playerState = LocalPlayerState.current
     val isPlaying = playerState?.isPlaying == true
     val currentMediaId = playerState?.currentMediaItem?.mediaId?.toLongOrNull()
+    // 小播放器是否显示（有歌在队列）：列表末尾避让空白块只在有歌时留
+    val hasMiniPlayer = (playerState?.player?.mediaItemCount ?: 0) != 0
     val albumInfoState by albumScreenViewModel.albumInfo.collectAsState()
     var openBottomSheet by rememberSaveable { mutableStateOf(false) }
     var openAlbumComments by rememberSaveable { mutableStateOf(false) }
@@ -316,6 +320,11 @@ fun AlbumScreen(
                         }
                     )
                 }
+
+                item {
+                    // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                    if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
+                }
             }
         }
     }
@@ -356,7 +365,11 @@ fun AlbumScreen(
                 mediaId = album.id,
                 mediaMetadata = albumMetadata,
                 commentType = 3,
-                onBackPressed = { openAlbumComments = false }
+                onBackPressed = { openAlbumComments = false },
+                onUserClick = { userId ->
+                    openAlbumComments = false
+                    navController.navigate(UserNav(userId = userId))
+                }
             )
         }
     }

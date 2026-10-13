@@ -10,6 +10,7 @@ import com.jussicodes.music.constants.libraryUserInfoCacheKey
 import com.jussicodes.music.constants.libraryUserPlaylistsCacheKey
 import com.jussicodes.music.constants.userIdKye
 import com.jussicodes.music.data.favoriteSongIdsDatastore
+import com.jussicodes.music.data.HomeUserInfoStore
 import com.jussicodes.music.utils.FavoriteSongSyncBus
 import com.jussicodes.music.utils.AvatarUploadLimiter
 import com.jussicodes.music.utils.PlaylistCollectionSyncBus
@@ -105,6 +106,7 @@ class LibraryScreenViewModel @Inject constructor(
                 prefs[libraryUserInfoCacheKey] = json.encodeToString(it)
                 prefs[userIdKye] = it.account.profile.userId
             }
+            HomeUserInfoStore.publishUserInfo(it)
             fetchUserDetail(it.account.profile.userId)
         }
     }
@@ -114,7 +116,9 @@ class LibraryScreenViewModel @Inject constructor(
         if (userId <= 0L || userId == lastUserDetailUid) return
         lastUserDetailUid = userId
         viewModelScope.launch {
-            _userDetail.value = ArtistApi.userDetail(userId).getOrNull()
+            val detail = ArtistApi.userDetail(userId).getOrNull()
+            _userDetail.value = detail
+            if (detail != null) HomeUserInfoStore.publishUserDetail(detail)
         }
     }
 
@@ -390,8 +394,11 @@ class LibraryScreenViewModel @Inject constructor(
     }
 
     private fun isFavoritePlaylist(playlist: Playlist, userId: Long): Boolean {
-        return playlist.specialType == LIKED_PLAYLIST_SPECIAL_TYPE ||
-            (playlist.creator?.userId == userId && playlist.name.contains(LIKED_PLAYLIST_NAME_FRAGMENT))
+        // 必须是"自己的"我喜欢的歌：收藏别人(specialType=5)的歌单时 creator 是对方，
+        // 不能当成本地喜欢的歌去覆盖数量/叠加本地喜欢列表。
+        val isOwner = playlist.creator?.userId == userId
+        return isOwner && (playlist.specialType == LIKED_PLAYLIST_SPECIAL_TYPE ||
+            playlist.name.contains(LIKED_PLAYLIST_NAME_FRAGMENT))
     }
 
     private fun mergeFavoritePlaylistState(playlists: List<Playlist>): List<Playlist> {

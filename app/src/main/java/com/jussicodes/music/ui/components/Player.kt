@@ -93,6 +93,7 @@ import com.jussicodes.music.ui.icons.SkipNextFill
 import com.jussicodes.music.ui.icons.SkipPreviousFill
 import com.jussicodes.music.ui.navigation.AlbumNav
 import com.jussicodes.music.ui.navigation.ArtistNav
+import com.jussicodes.music.ui.navigation.UserNav
 import com.jussicodes.music.ui.navigation.CloudSongNav
 import com.jussicodes.music.ui.navigation.PlaylistNav
 import com.jussicodes.music.ui.navigation.RadioNav
@@ -919,7 +920,16 @@ fun Player(
             PlayerComments(
                 mediaId = mediaId?.toLongOrNull(),
                 mediaMetadata = mediaMetadata,
-                onBackPressed = { openComments = false }
+                onBackPressed = { openComments = false },
+                onUserClick = { userId ->
+                    // 全屏播放是 MainScreen 里 zIndex(1f) 的 overlay、评论区是 Dialog 窗口，
+                    // 二者都压在 NavHost 之上。只 navigate 会把 UserNav 推到它们下方被盖住，
+                    // 得连退两层才见主页。故：关评论区 + navigate 推主页 + onBackPressed 收起
+                    // 全屏 overlay，主页即刻可见（与"播放器内点歌手跳 Artist"同款收尾）。
+                    openComments = false
+                    navController.navigate(UserNav(userId = userId))
+                    onBackPressed()
+                }
             )
         }
         }

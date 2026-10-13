@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -51,9 +52,11 @@ import androidx.navigation.NavHostController
 import com.jussicodes.music.LocalPlayerController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MediaSessionConstants
+import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.R
 import com.jussicodes.music.constants.AlbumThumbnailSize
 import com.jussicodes.music.constants.ListItemHeight
+import com.jussicodes.music.data.HomeBgTextStore
 import com.jussicodes.music.data.favoriteSongIdsDatastore
 import com.jussicodes.music.extensions.playMediaAtId
 import com.jussicodes.music.extensions.setPlaylist
@@ -63,6 +66,7 @@ import com.jussicodes.music.ui.components.PlaylistGridItem
 import com.jussicodes.music.ui.components.SongListItem
 import com.jussicodes.music.ui.components.SongMenuBottomSheet
 import com.jussicodes.music.ui.components.TopBar
+import com.jussicodes.music.ui.components.resolveHomeBgTextColor
 import com.jussicodes.music.ui.navigation.PlaylistNav
 import com.jussicodes.music.ui.navigation.Screen
 import com.jussicodes.music.viewModel.ExploreScreenViewModel
@@ -86,6 +90,8 @@ fun ExploreScreen(
     val playerState = LocalPlayerState.current
     val isPlaying = playerState?.isPlaying == true
     val currentMediaId = playerState?.currentMediaItem?.mediaId?.toLongOrNull()
+    // 小播放器是否显示（有歌在队列）：列表末尾避让空白块只在有歌时留
+    val hasMiniPlayer = (playerState?.player?.mediaItemCount ?: 0) != 0
     var openBottomSheet by rememberSaveable { mutableStateOf(false) }
     var selectSong by remember { mutableStateOf<Song?>(null) }
     val context = LocalContext.current
@@ -107,9 +113,22 @@ fun ExploreScreen(
         }
     }
 
+    // 主页文字色（设置页「外观」选择）：auto 档不覆盖（scheme 原样，逐像素一致、零重绘）；
+    // 白/黑档用本地 ColorScheme 覆盖整页（卡片内 onSurface/onSurfaceVariant 读取处自动跟随）。
+    val bgTextMode = HomeBgTextStore.state.collectAsState().value
+    val bgTextColor = resolveHomeBgTextColor(bgTextMode, MaterialTheme.colorScheme)
+    MaterialTheme(colorScheme = if (bgTextMode == "auto") {
+        MaterialTheme.colorScheme
+    } else {
+        MaterialTheme.colorScheme.copy(
+            onSurface = bgTextColor,
+            onSurfaceVariant = bgTextColor.copy(alpha = 0.85f),
+        )
+    }) {
     Scaffold(
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
         topBar = {
-            TopBar(navController = navController, titleRes = R.string.explore)
+            TopBar(navController = navController, titleRes = R.string.explore, transparent = true, contentColor = bgTextColor)
         },
     ) { padding ->
             PullToRefreshBox(
@@ -253,8 +272,14 @@ fun ExploreScreen(
                             }
                         }
                     }
+
+                    item {
+                        // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                        if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
+                    }
                 }
             }
+    }
     }
 
     SongMenuBottomSheet(

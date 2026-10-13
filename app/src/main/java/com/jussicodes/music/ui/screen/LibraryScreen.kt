@@ -14,6 +14,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,8 +38,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalIconButton
@@ -76,13 +76,22 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import coil3.compose.AsyncImage
 import com.jussicodes.music.R
-import com.jussicodes.music.constants.ncmCookieKey
-import com.jussicodes.music.constants.pinnedAlbumsHiddenKey
+import com.jussicodes.music.LocalPlayerState
+import com.jussicodes.music.constants.MiniPlayerHeight
+import com.jussicodes.music.data.HomeBgTextStore
+import com.jussicodes.music.data.HomeTransparentCardStore
+import com.jussicodes.music.data.HomeUserInfoStore
+import com.jussicodes.music.data.NcmCookieStore
 import com.jussicodes.music.data.PinnedAlbumStore
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import com.jussicodes.music.ui.components.transparentCardColor
+import com.jussicodes.music.ui.components.userCardGlassColor
 import com.jussicodes.music.ui.components.LargeImageDialog
 import com.jussicodes.music.ui.components.PinnedAlbumPickDialog
 import com.jussicodes.music.ui.components.PinnedAlbumsCard
 import com.jussicodes.music.ui.components.TopBar
+import com.jussicodes.music.ui.components.resolveHomeBgTextColor
 import com.jussicodes.music.ui.icons.Favorite
 import com.jussicodes.music.ui.icons.History
 import com.jussicodes.music.ui.icons.Leaderboard
@@ -100,8 +109,6 @@ import com.jussicodes.music.ui.navigation.UserFollowNav
 import com.jussicodes.music.utils.CoverImageSize
 import com.jussicodes.music.utils.AvatarUploadLimiter
 import com.jussicodes.music.utils.PlaylistCoverSyncBus
-import com.jussicodes.music.utils.dataStore
-import com.jussicodes.music.utils.rememberNullablePreference
 import com.jussicodes.music.utils.toCoverImageUrl
 import com.jussicodes.music.utils.withAvatarCacheBuster
 import com.jussicodes.music.utils.withPlaylistCoverCacheBuster
@@ -124,9 +131,18 @@ fun LibraryScreen(
     navController: NavHostController,
     libraryScreenViewModel: LibraryScreenViewModel = hiltViewModel()
 ) {
-    val ncmCookie by rememberNullablePreference(ncmCookieKey)
+    // cookie 读进程级 NcmCookieStore（Application watcher 从 DataStore 灌值）：
+    // 本 Screen 每次"探索划回主页"都随路由切换整块重组，rememberNullablePreference
+    // 是冷流 collectAsState(initial=null)，重组首帧 cookie=null 会闪一帧"点击登录"
+    // 卡片 + LazyColumn 整块不渲染（用户报的"闪未登录提示框/信息卡片闪白"）。
+    val ncmCookie by NcmCookieStore.cookie.collectAsState()
+    // 小播放器是否显示（有歌在队列）：末尾避让空白块只在有歌时留。
+    val hasMiniPlayer = (LocalPlayerState.current?.player?.mediaItemCount ?: 0) != 0
     val userInfoBatchState by libraryScreenViewModel.userInfo.collectAsState()
-    val userDetailState by libraryScreenViewModel.userDetail.collectAsState()
+    // 信息卡内容走进程级 store（PinnedAlbumStore 同款）：VM 的 collectAsState 首帧可能出 null
+    // （userInfo 门控整卡 / userDetail 无缓存恒 null）→ 切 tab 重组闪一下；进程级首帧即真值。
+    val homeUserInfo = HomeUserInfoStore.userInfo.collectAsState().value
+    val homeUserDetail = HomeUserInfoStore.userDetail.collectAsState().value
     val favoriteSongState by libraryScreenViewModel.favoriteSong.collectAsState()
     val userPlaylists by libraryScreenViewModel.userPlaylists.collectAsState()
     val isAvatarUploading by libraryScreenViewModel.isAvatarUploading.collectAsState()
@@ -165,19 +181,11 @@ fun LibraryScreen(
     var editNickname by remember { mutableStateOf("") }
     var editSignature by remember { mutableStateOf("") }
     var profileUpdateBusy by remember { mutableStateOf(false) }
-    // 专辑墙关闭标志(DataStore)：冷启动首帧 DataStore 未出值前不渲染卡片。
-    // 旧实现用 rememberPreference(key, false) 先给默认 false → 已关闭的墙也会先
-    // 渲染一帧（专辑列表空 → 左上角加号闪现）等真值读回来才消失。
-    // 现在用同一趟 data.collect：首帧值到达时同时落 hidden 真值 + settled 标记，
-    // 卡片只在两值都就绪后才渲染，杜绝加号闪现；设置页恢复时后续值也持续回流。
-    var pinnedAlbumsHidden by remember { mutableStateOf(false) }
-    var pinnedAlbumsHiddenSettled by remember { mutableStateOf(false) }
-    LaunchedEffect(context) {
-        context.dataStore.data.collect { prefs ->
-            pinnedAlbumsHidden = prefs[pinnedAlbumsHiddenKey] ?: false
-            pinnedAlbumsHiddenSettled = true
-        }
-    }
+    // 专辑墙关闭标志读进程级 PinnedAlbumStore.hiddenState（启动时 DataStore→单例回流）：
+    // null = 冷启动首帧 DataStore 尚未出值，不渲染卡片（加号不会闪现）；
+    // 切 tab 重组合时不丢——旧实现用 remember 存本地状态,切回主页会复位成
+    // (false, settled=false) 先闪一帧再恢复,就是用户看到的"闪一下"。
+    val pinnedAlbumsHidden by PinnedAlbumStore.hiddenState.collectAsState()
 
     LaunchedEffect(ncmCookie) {
         val cookie = ncmCookie ?: return@LaunchedEffect
@@ -192,25 +200,34 @@ fun LibraryScreen(
 
     val userId = userInfoBatchState?.account?.profile?.userId ?: 0L
     val favoritePlaylistId = userPlaylists.firstOrNull { playlist ->
-        playlist.specialType == 5 ||
-            (playlist.creator?.userId == userId && playlist.name.contains(LIKED_PLAYLIST_NAME_FRAGMENT))
+        playlist.creator?.userId == userId && (
+            playlist.specialType == 5 ||
+            playlist.name.contains(LIKED_PLAYLIST_NAME_FRAGMENT))
     }?.id
     val favoritePlaylist = userPlaylists.firstOrNull { it.id == favoritePlaylistId }
     val normalPlaylists = userPlaylists.filterNot { it.id == favoritePlaylistId }
     val collectedPlaylists = normalPlaylists.filter { it.subscribed || it.creator?.userId != userId }
     val createdPlaylists = normalPlaylists.filterNot { it in collectedPlaylists }
 
+    // 主页文字色（设置页「外观」选择）：auto 档不覆盖（scheme 原样，逐像素一致、零重绘）；
+    // 白/黑档用本地 ColorScheme 覆盖整页（卡片内 onSurface/onSurfaceVariant 读取处自动跟随）。
+    val bgTextMode = HomeBgTextStore.state.collectAsState().value
+    val bgTextColor = resolveHomeBgTextColor(bgTextMode, MaterialTheme.colorScheme)
+    MaterialTheme(colorScheme = if (bgTextMode == "auto") {
+        MaterialTheme.colorScheme
+    } else {
+        MaterialTheme.colorScheme.copy(
+            onSurface = bgTextColor,
+            onSurfaceVariant = bgTextColor.copy(alpha = 0.85f),
+        )
+    }) {
     Scaffold(
-        topBar = { TopBar(navController = navController, titleRes = R.string.mine) }
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        topBar = { TopBar(navController = navController, titleRes = R.string.mine, transparent = true, contentColor = bgTextColor) }
     ) { padding ->
-        if (ncmCookie == null) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surface)
-                    .padding(padding)
-            )
-        } else if (ncmCookie?.isEmpty() == true) {
+        // 未登录（cookie 键不存在 / 空串）都显示「点击登录」卡片；
+        // 原先键不存在（全新安装/从未登录过）走空 Box，登录提示整页看不见。
+        if (ncmCookie == null || ncmCookie?.isEmpty() == true) {
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -222,7 +239,7 @@ fun LibraryScreen(
                         .padding(24.dp)
                         .clickable { navController.navigate(Screen.Login.route) },
                     shape = MaterialTheme.shapes.extraLarge,
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+                    colors = CardDefaults.cardColors(containerColor = transparentCardColor())
                 ) {
                     Column(
                         modifier = Modifier.padding(32.dp),
@@ -247,7 +264,6 @@ fun LibraryScreen(
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.surface)
                     .padding(padding),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     start = 12.dp,
@@ -257,14 +273,14 @@ fun LibraryScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                userInfoBatchState?.let {
+                homeUserInfo?.let {
                     item {
                         LibraryUserCard(
                             navController = navController,
                             userInfo = it,
                             avatarCacheVersion = avatarCacheVersion,
-                            followsCount = userDetailState?.profile?.followsCount,
-                            followedsCount = userDetailState?.profile?.followedsCount,
+                            followsCount = homeUserDetail?.profile?.followsCount,
+                            followedsCount = homeUserDetail?.profile?.followedsCount,
                             onRoamClick = { navController.navigate(Screen.Roam.route) },
                             onRecentPlayClick = { navController.navigate(Screen.RecentPlay.route) },
                             onMessagesClick = { navController.navigate(Screen.Messages.route) },
@@ -382,7 +398,7 @@ fun LibraryScreen(
                 }
 
                 item {
-                    if (pinnedAlbumsHiddenSettled && !pinnedAlbumsHidden) {
+                    if (pinnedAlbumsHidden == false) {
                         PinnedAlbumsCard(
                             onOpenAlbum = { album -> navController.navigate(AlbumNav(albumId = album.id)) },
                             onAddClick = { showPinnedAlbumPickDialog = true }
@@ -390,9 +406,15 @@ fun LibraryScreen(
                     }
                 }
 
-                item { Spacer(modifier = Modifier.navigationBarsPadding()) }
+                item {
+                    // 列表末尾（专辑墙下方）空白：小播放器悬浮在底栏上方，滚到底最后一段
+                    // 会被它盖住 64dp；有歌时末尾垫一块 MiniPlayerHeight 避让。
+                    if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
+                    Spacer(modifier = Modifier.navigationBarsPadding())
+                }
             }
         }
+    }
     }
 
     editingPlaylist?.let { playlist ->
@@ -754,7 +776,21 @@ private fun LibraryUserCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+        // 磨砂薄玻璃：开开关 = surface+primary 轻染的半透明玻璃（见 userCardGlassColor）；
+        // 关开关 = surfaceContainerLow 不透明实底。
+        // 描边走 Card 的 border 参数而不是在内容里垫 Box——垫 Box 会占一行布局、
+        // 把内容往下推，且描边画在卡片内部而非卡片边缘。
+        border = if (HomeTransparentCardStore.state.collectAsState().value) {
+            BorderStroke(
+                width = 1.dp,
+                color = androidx.compose.ui.graphics.Color.White.copy(
+                    alpha = if (isSystemInDarkTheme()) 0.14f else 0.35f
+                )
+            )
+        } else {
+            null
+        },
+        colors = CardDefaults.cardColors(containerColor = userCardGlassColor())
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(16.dp),
@@ -767,6 +803,7 @@ private fun LibraryUserCard(
                 Box(
                     modifier = Modifier
                         .size(76.dp)
+                        .background(MaterialTheme.colorScheme.surface, CircleShape)
                         .clip(CircleShape)
                         .clickable(enabled = profile.avatarUrl.isNotBlank(), onClick = onAvatarClick),
                     contentAlignment = Alignment.BottomEnd
@@ -976,7 +1013,7 @@ private fun FavoritePlaylistCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+        colors = CardDefaults.cardColors(containerColor = transparentCardColor())
     ) {
         Box(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(14.dp)) {
             RowCardContent(
@@ -1040,7 +1077,7 @@ private fun PlaylistGroupCard(
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+        colors = CardDefaults.cardColors(containerColor = transparentCardColor())
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(text = title, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 4.dp))

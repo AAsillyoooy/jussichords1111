@@ -2,6 +2,8 @@ package com.jussicodes.music.ui.screen
 
 import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,7 +33,6 @@ import androidx.compose.material.icons.outlined.KeyboardArrowRight
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -48,6 +49,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,10 +58,14 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import coil3.compose.AsyncImage
+import com.jussicodes.music.utils.CoverImageSize
+import com.jussicodes.music.utils.toCoverImageUrl
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -76,26 +82,33 @@ import com.jussicodes.music.constants.apiServerListKey
 import com.jussicodes.music.constants.audioQualityKey
 import com.jussicodes.music.constants.desktopLyricEnabledKey
 import com.jussicodes.music.constants.ignoredUpdateVersionKey
-import com.jussicodes.music.constants.localSourceKey
+import com.jussicodes.music.constants.audioSourceKey
+import com.jussicodes.music.constants.directSourceKey
 import com.jussicodes.music.constants.githubDownloadSourceKey
 import com.jussicodes.music.constants.ncmCookieKey
 import com.jussicodes.music.constants.playerGestureTutorialVersionKey
 import com.jussicodes.music.constants.pinnedAlbumsHiddenKey
+import com.jussicodes.music.constants.homeBgBlurKey
+import com.jussicodes.music.constants.homeBgImageKey
+import com.jussicodes.music.constants.homeBgOffsetXKey
+import com.jussicodes.music.constants.homeBgOffsetYKey
+import com.jussicodes.music.constants.homeBgOpacityKey
+import com.jussicodes.music.constants.homeBgScaleKey
 import com.jussicodes.music.constants.themeColorSourceKey
 import com.jussicodes.music.constants.unblockSourceKey
 import com.jussicodes.music.lyric.DesktopLyricManager
-import com.jussicodes.music.ui.components.LocalSourceDialog
+import com.jussicodes.music.ui.components.ScaledDialogContent
 import com.jussicodes.music.ui.components.Dialog
 import com.jussicodes.music.ui.components.SongQualityDialog
 import com.jussicodes.music.ui.components.ThemeColorSourceDialog
+import com.jussicodes.music.ui.components.HomeBackgroundConfig
 import com.jussicodes.music.ui.components.UnblockSourceDialog
 import com.jussicodes.music.ui.components.UpdateDialog
-import com.jussicodes.music.ui.components.localSourceOptions
 import com.jussicodes.music.ui.components.unblockSourceOptions
 import com.jussicodes.music.ui.icons.Album
 import com.jussicodes.music.ui.icons.AudioLines
 import com.jussicodes.music.ui.icons.DesktopLyrics
-import com.jussicodes.music.ui.icons.Dns
+import androidx.compose.material.icons.outlined.Dns
 import com.jussicodes.music.ui.icons.Gesture
 import com.jussicodes.music.ui.icons.Github
 import com.jussicodes.music.ui.icons.Login
@@ -103,10 +116,13 @@ import com.jussicodes.music.ui.icons.Logout
 import com.jussicodes.music.ui.icons.MusicNote
 import com.jussicodes.music.ui.icons.Palette
 import com.jussicodes.music.ui.icons.Remove
+import com.jussicodes.music.ui.icons.Script
+import com.jussicodes.music.ui.icons.SettingsGear
 import com.jussicodes.music.ui.icons.UserRound
 import com.jussicodes.music.ui.navigation.Screen
 import com.jussicodes.music.ui.theme.ThemeColorSource
 import com.jussicodes.music.utils.AppUpdateManager
+import com.jussicodes.music.utils.SettingsAppearanceBus
 import com.jussicodes.music.utils.NcmCookieNormalizer
 import com.jussicodes.music.utils.ApiServerStatus
 import com.jussicodes.music.utils.UpdateDownloadPhase
@@ -120,6 +136,12 @@ import com.jussicodes.music.utils.rememberEnumPreference
 import com.jussicodes.music.utils.rememberPreference
 import com.jussicodes.music.utils.sourceById
 import com.rcmiku.ncmapi.api.account.AccountApi
+import com.rcmiku.ncmapi.api.AudioSources
+import com.rcmiku.ncmapi.api.LocalSources
+import com.rcmiku.ncmapi.api.player.PlayerApi
+import com.jussicodes.music.lx.AudioSourceSwitcher
+import com.jussicodes.music.ui.components.AudioSourceSelector
+import com.jussicodes.music.ui.components.LocalSourceDialog
 import com.rcmiku.ncmapi.api.player.SongLevel
 import com.rcmiku.ncmapi.utils.json
 import com.rcmiku.ncmapi.utils.parseCookieString
@@ -131,7 +153,6 @@ import java.io.File
 @Composable
 fun SettingsScreen(navController: NavHostController) {
     val context = LocalContext.current
-    val uriHandler = LocalUriHandler.current
     val coroutineScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
     val dynamicColorAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
@@ -146,7 +167,45 @@ fun SettingsScreen(navController: NavHostController) {
     var pinnedAlbumsHidden by rememberPreference(pinnedAlbumsHiddenKey, false)
     var apiBaseUrl by rememberPreference(apiBaseUrlKey, "")
     var unblockSource by rememberPreference(unblockSourceKey, "AUTO")
-    var localSource by rememberPreference(localSourceKey, "AUTO")
+    // 音源三选一（LX / 内置直连 / 代理）。旧选择由 JetMeloApp 里的一次性迁移清掉，
+    // 这里不做重置——否则每次进设置页都会把用户的选择打回 LX。
+    var audioSource by rememberPreference(audioSourceKey, AudioSources.DEFAULT)
+    // 「直连音源」档位下的六源单选（音源设置里的子设置）。
+    var directSource by rememberPreference(directSourceKey, LocalSources.AUTO)
+    LaunchedEffect(directSource) {
+        PlayerApi.DirectSourceSettings.SOURCE = directSource
+    }
+    // 三行子设置各自报「当前正在使用谁」，按 audioSource 档位走：
+    // LX 档位说脚本名，直连/代理档位说「当前正在使用 LX源」（或直连源名/服务器）。
+    val lxPlugins by com.jussicodes.music.lx.LxPluginManager.plugins.collectAsState(initial = emptyList())
+    val enabledLxScripts = lxPlugins.filter { it.isEnabled }
+    // 当前真正负责解析的脚本名：LX 档位取列表首个启用项（PlayerApi 也是按顺序轮询）
+    val activeLxScriptName = enabledLxScripts.firstOrNull()?.name
+    val inUseLabel = when (audioSource) {
+        AudioSources.LX -> "LX源"
+        AudioSources.DIRECT -> LocalSources.fromKey(directSource)?.label ?: "直连源"
+        else -> apiBaseUrl.ifBlank { "API代理服务器" }
+    }
+    val lxScriptSummary = when {
+        lxPlugins.isEmpty() -> "未导入脚本"
+        audioSource == AudioSources.LX -> if (activeLxScriptName != null) {
+            "当前正在使用${activeLxScriptName}脚本 · ${enabledLxScripts.size}/${lxPlugins.size} 个脚本已启用"
+        } else {
+            "${lxPlugins.size} 个脚本（全部停用）"
+        }
+        enabledLxScripts.isNotEmpty() -> "当前正在使用 ${activeLxScriptName ?: "LX源"}"
+        else -> "当前正在使用 $inUseLabel"
+    }
+    val directSourceSummary = if (audioSource == AudioSources.DIRECT) {
+        LocalSources.fromKey(directSource)?.label ?: directSource
+    } else {
+        "当前正在使用 $inUseLabel"
+    }
+    val apiServerSummary = if (audioSource == AudioSources.PROXY) {
+        apiBaseUrl.ifBlank { "未设置" }
+    } else {
+        "当前正在使用 $inUseLabel"
+    }
     var ignoredUpdateVersion by rememberPreference(ignoredUpdateVersionKey, "")
     var playerGestureTutorialVersion by rememberPreference(
         playerGestureTutorialVersionKey,
@@ -157,10 +216,112 @@ fun SettingsScreen(navController: NavHostController) {
         githubDownloadSourceKey,
         downloadSources.first().id
     )
-    var showQualityDialog by remember { mutableStateOf(false) }
+    // 主页背景（"我的"/"探索"页）：本地图片路径 + 缩放/透明度/模糊度/平移。
+    var homeBgPath by rememberPreference(homeBgImageKey, "")
+    var homeBgScale by rememberPreference(homeBgScaleKey, 1f)
+    var homeBgOpacity by rememberPreference(homeBgOpacityKey, 1f)
+    var homeBgBlur by rememberPreference(homeBgBlurKey, 0f)
+    val homeTransparentCard = com.jussicodes.music.data.HomeTransparentCardStore.state.collectAsState().value
+    // 主页文字颜色（设置页「外观」选择）：进程级 store，auto/white/black。
+    val homeBgTextColor = com.jussicodes.music.data.HomeBgTextStore.state.collectAsState().value
+    var homeBgOffsetX by rememberPreference(homeBgOffsetXKey, 0f)
+    var homeBgOffsetY by rememberPreference(homeBgOffsetYKey, 0f)
+    val homeBg = remember(
+        homeBgPath, homeBgScale, homeBgOpacity, homeBgBlur, homeBgOffsetX, homeBgOffsetY
+    ) {
+        HomeBackgroundConfig(
+            path = homeBgPath,
+            scale = homeBgScale,
+            opacity = homeBgOpacity,
+            blur = homeBgBlur,
+            offsetX = homeBgOffsetX,
+            offsetY = homeBgOffsetY,
+        )
+    }
+    // 选完图不留在设置页：建 draft（保留现有参数、换上图）→ 关闭弹窗 → 跳回主页进入编辑模式。
     var showThemeColorSourceDialog by remember { mutableStateOf(false) }
+    // 主页背景编辑"放弃"后回来：自动打开「外观」弹窗（一次性消费，手动进设置页不会再弹）
+    LaunchedEffect(Unit) {
+        SettingsAppearanceBus.requested.collectLatest { open ->
+            if (open) {
+                showThemeColorSourceDialog = true
+                SettingsAppearanceBus.consume()
+            }
+        }
+    }
+    fun startHomeBgEdit(config: HomeBackgroundConfig, ownsFile: Boolean) {
+        com.jussicodes.music.data.HomeBgEditor.begin(config, ownsFile)
+        showThemeColorSourceDialog = false
+        // 立即返回主页进编辑模式：把设置页（含外观弹窗）整体弹出栈，
+        // 调参全部在主页编辑面板完成，保存后按返回也不会再冒出旧设置页。
+        navController.navigate(Screen.Library.route) {
+            popUpTo(Screen.Settings.route) { inclusive = true }
+            launchSingleTop = true
+        }
+    }
+    // 选图失败原因（完整可读，走弹窗）。声明须先于 homeBgPicker：
+    // launcher 回调（lambda）不能前向引用后声明的本地 remember 变量。
+    var bgSelectFailureReason by remember { mutableStateOf<String?>(null) }
+    val homeBgPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                val result = com.jussicodes.music.data.HomeBgStore.select(context, uri)
+                when (result) {
+                    is com.jussicodes.music.data.HomeBgStore.HomeBgSelectResult.Success -> {
+                        // 成功：立即进主页编辑模式实时预览（startHomeBgEdit 内部 begin draft + 跳 Library）。
+                        startHomeBgEdit(
+                            HomeBackgroundConfig(
+                                path = result.path,
+                                scale = homeBgScale,
+                                opacity = homeBgOpacity,
+                                blur = homeBgBlur,
+                                offsetX = homeBgOffsetX,
+                                offsetY = homeBgOffsetY,
+                            ),
+                            ownsFile = true
+                        )
+                    }
+                    is com.jussicodes.music.data.HomeBgStore.HomeBgSelectResult.Failure -> {
+                        // 完整原因（含 URI/异常 message）走可滚动弹窗，避免 toast 截断读不全。
+                        bgSelectFailureReason = result.reason
+                    }
+                }
+            }
+        }
+    }
+    fun removeHomeBg() {
+        coroutineScope.launch {
+            // 隐藏bug修复：编辑进行中（选了新图还没保存）也能从底栏回到设置页点「移除」，
+            // 旧逻辑 clear() 会把编辑草稿引用的临时文件一并删掉，之后 commit 会把
+            // 一个已不存在的路径写进 DataStore → 背景静默变空。先丢弃草稿再清理。
+            com.jussicodes.music.data.HomeBgEditor.cancel(context)
+            com.jussicodes.music.data.HomeBgStore.clear(context)
+            homeBgPath = ""
+            homeBgScale = 1f
+            homeBgOpacity = 1f
+            homeBgBlur = 0f
+            homeBgOffsetX = 0f
+            homeBgOffsetY = 0f
+        }
+    }
+    var showQualityDialog by remember { mutableStateOf(false) }
     var showUnblockSourceDialog by remember { mutableStateOf(false) }
-    var showLocalSourceDialog by remember { mutableStateOf(false) }
+    var showDirectSourceDialog by remember { mutableStateOf(false) }
+
+
+
+    // 切换音源后重解析当前播放的歌：清掉 ResolvingDataSource 的解析缓存（cacheKey
+    // 只含音质，不含音源），重新 prepare 当前 MediaItem 让它走一遍新的解析链。
+    fun reloadCurrentSong() {
+        coroutineScope.launch {
+            // rememberPreference 是异步写盘，延迟一下让 DataStore 先落定，
+            // 否则 JetMeloApp 的 collect 可能用旧值把 ncmapi 全局变量覆盖回去。
+            kotlinx.coroutines.delay(150)
+            AudioSourceSwitcher.apply(audioSource, directSource)
+        }
+    }
     var showCookieDialog by remember { mutableStateOf(false) }
     var showGithubSourceDialog by remember { mutableStateOf(false) }
     var githubSourceStatuses by remember { mutableStateOf<List<UpdateSourceStatus>>(emptyList()) }
@@ -187,6 +348,7 @@ fun SettingsScreen(navController: NavHostController) {
     }
     var pendingOverlayGrant by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var accountAvatar by rememberSaveable { mutableStateOf("") }
     var accountNickname by rememberSaveable { mutableStateOf("") }
 
     DisposableEffect(lifecycleOwner, context) {
@@ -212,14 +374,16 @@ fun SettingsScreen(navController: NavHostController) {
         }
     }
 
-    // 退出登录副标题显示当前账号昵称
+    // 退出登录行：副标题=昵称，图标=当前账号头像
     LaunchedEffect(ncmCookie) {
         if (ncmCookie.isEmpty()) {
             accountNickname = ""
+            accountAvatar = ""
             return@LaunchedEffect
         }
-        accountNickname = AccountApi.account().getOrNull()
-            ?.account?.profile?.nickname.orEmpty()
+        val profile = AccountApi.account().getOrNull()?.account?.profile
+        accountNickname = profile?.nickname.orEmpty()
+        accountAvatar = profile?.avatarUrl.orEmpty()
     }
 
     LaunchedEffect(Unit) {
@@ -299,6 +463,12 @@ fun SettingsScreen(navController: NavHostController) {
         }
 
         ThemeColorSource.ARTWORK -> "从当前播放音乐的封面取色"
+
+        ThemeColorSource.HOME_BG -> if (homeBgPath.isNotBlank()) {
+            "从主页背景图取色"
+        } else {
+            "主页背景图取色（未设置图片）"
+        }
     }
     val appearanceWithScale = "$appearanceSubtitle · 缩放 ${(uiScaleController.scale * 100).toInt()}%"
     val accountCookie = remember(ncmCookie) { ncmCookie.toCookieHeader() }
@@ -328,6 +498,19 @@ fun SettingsScreen(navController: NavHostController) {
                 imageVector = if (loggedOut) Login else Logout,
                 danger = !loggedOut,
                 subtitle = if (loggedOut) null else "当前账号：${accountNickname.ifEmpty { "点击退出" }}",
+                // 已登录时用头像当图标（36dp 圆形），未登录/取不到头像则退回 Logout 图标
+                iconContent = if (!loggedOut && accountAvatar.isNotBlank()) {
+                    {
+                        AsyncImage(
+                            model = accountAvatar.toCoverImageUrl(CoverImageSize.LIST),
+                            contentDescription = null,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(CircleShape)
+                        )
+                    }
+                } else null,
                 onClick = {
                     if (loggedOut) {
                         navController.navigate(Screen.Login.route)
@@ -376,6 +559,15 @@ fun SettingsScreen(navController: NavHostController) {
                     )
                     Spacer(Modifier.width(12.dp))
                 }
+            ),
+            SettingItemData(
+                title = "播放器手势教程",
+                subtitle = "重新显示点按和上滑提示",
+                imageVector = Gesture,
+                onClick = {
+                    playerGestureTutorialVersion = 0
+                    Toast.makeText(context, "播放器手势教程已重新开启", Toast.LENGTH_SHORT).show()
+                }
             )
         )
     )
@@ -398,31 +590,62 @@ fun SettingsScreen(navController: NavHostController) {
                 },
                 imageVector = AudioLines,
                 onClick = { showQualityDialog = true }
-            ),
-            SettingItemData(
-                title = "播放器手势教程",
-                subtitle = "重新显示点按和上滑提示",
-                imageVector = Gesture,
-                onClick = {
-                    playerGestureTutorialVersion = 0
-                    Toast.makeText(context, "播放器手势教程已重新开启", Toast.LENGTH_SHORT).show()
-                }
             )
         )
     )
 
     val advancedGroup = SettingGroupData(
-        name = "高级",
+        name = "音源设置",
+        note = "三种音源只生效一个；切换后立即用新音源重新解析当前播放的歌",
+        header = {
+            AudioSourceSelector(
+                currentSource = audioSource,
+                onSourceSelected = { selected ->
+                    if (selected != audioSource) {
+                        audioSource = selected
+                        reloadCurrentSong()
+                    }
+                }
+            )
+        },
         items = listOf(
             SettingItemData(
-                title = "本地音乐源",
-                subtitle = localSourceOptions.firstOrNull { it.value == localSource }?.label,
+                title = "LX 脚本管理",
+                subtitle = lxScriptSummary,
+                imageVector = Script,
+                onClick = { navController.navigate(Screen.LxPlugins.route) }
+            ),
+            SettingItemData(
+                title = "直连源",
+                subtitle = directSourceSummary,
                 imageVector = MusicNote,
-                onClick = { showLocalSourceDialog = true }
+                onClick = { showDirectSourceDialog = true }
+            ),
+            SettingItemData(
+                title = stringResource(R.string.api_server),
+                subtitle = apiServerSummary,
+                warning = httpWarning,
+                imageVector = Icons.Outlined.Dns,
+                onClick = { showApiServerDialog = true },
+                trailingContent = {
+                    GearButton("更换解灰源") { showUnblockSourceDialog = true }
+                }
+            )
+        )
+    )
+
+    val aboutGroup = SettingGroupData(
+        name = "关于",
+        items = listOf(
+            SettingItemData(
+                title = "jussichords",
+                subtitle = "简洁的第三方网易云音乐客户端",
+                imageVector = MusicNote
             ),
             SettingItemData(
                 title = if (updating) "正在检查" else "检查更新",
-                subtitle = if (updating) "正在检查更新" else BuildConfig.VERSION_NAME,
+                subtitle = sourceById(githubDownloadSource)?.name?.let { "$it · v${BuildConfig.VERSION_NAME}" }
+                    ?: BuildConfig.VERSION_NAME,
                 imageVector = Github,
                 onClick = {
                     if (!updating) {
@@ -447,62 +670,22 @@ fun SettingsScreen(navController: NavHostController) {
                             }
                         }
                     }
-                }
-            ),
-            SettingItemData(
-                title = "更新源",
-                subtitle = sourceById(githubDownloadSource)?.name,
-                imageVector = Github,
-                onClick = {
-                    showGithubSourceDialog = true
-                    testingGithubSources = true
-                    coroutineScope.launch {
-                        githubSourceStatuses = AppUpdateManager.measureDownloadSources()
-                        testingGithubSources = false
+                },
+                trailingContent = {
+                    GearButton("更换更新源") {
+                        showGithubSourceDialog = true
+                        testingGithubSources = true
+                        coroutineScope.launch {
+                            githubSourceStatuses = AppUpdateManager.measureDownloadSources()
+                            testingGithubSources = false
+                        }
                     }
                 }
             )
         )
     )
 
-    val advanced2Group = SettingGroupData(
-        name = "进阶",
-        note = "支持自建 api-enhanced 服务器",
-        items = listOf(
-            SettingItemData(
-                title = stringResource(R.string.api_server),
-                subtitle = apiBaseUrl.ifBlank { "未设置" },
-                warning = httpWarning,
-                imageVector = Dns,
-                onClick = { showApiServerDialog = true }
-            ),
-            SettingItemData(
-                title = "音乐源",
-                subtitle = unblockSourceOptions.firstOrNull { it.value == unblockSource }?.label,
-                imageVector = MusicNote,
-                onClick = { showUnblockSourceDialog = true }
-            )
-        )
-    )
-
-    val aboutGroup = SettingGroupData(
-        name = "关于",
-        items = listOf(
-            SettingItemData(
-                title = "jussichords",
-                subtitle = "简洁的第三方网易云音乐客户端",
-                imageVector = MusicNote
-            ),
-            SettingItemData(
-                title = "jussicodes",
-                subtitle = "项目作者",
-                imageVector = UserRound,
-                onClick = { uriHandler.openUri("https://github.com/easyTIDollar") }
-            )
-        )
-    )
-
-    val groups = listOf(accountGroup, uiGroup, playbackGroup, advancedGroup, advanced2Group, aboutGroup)
+    val groups = listOf(accountGroup, uiGroup, playbackGroup, advancedGroup, aboutGroup)
 
     // 搜索：按标题 / 副标题 / 分组名过滤，无结果的分组整组隐藏
     val query = searchQuery.trim().lowercase()
@@ -541,7 +724,7 @@ fun SettingsScreen(navController: NavHostController) {
                 start = 12.dp,
                 top = padding.calculateTopPadding(),
                 end = 12.dp,
-                bottom = bottomInset
+                bottom = bottomInset + 16.dp
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -585,6 +768,22 @@ fun SettingsScreen(navController: NavHostController) {
             onDismiss = { showThemeColorSourceDialog = false },
             onSourceSelected = { themeColorSource = it },
             onUiScaleSelected = uiScaleController.setScale,
+            homeBg = homeBg,
+            onHomeBgPick = { homeBgPicker.launch("image/*") },
+            onHomeBgRemoved = { removeHomeBg() },
+            onHomeBgTune = { startHomeBgEdit(homeBg, ownsFile = false) },
+            homeBgTextColor = homeBgTextColor,
+            onHomeBgTextColorChanged = { v ->
+                coroutineScope.launch {
+                    com.jussicodes.music.data.HomeBgTextStore.set(context, v)
+                }
+            },
+            homeTransparentCard = homeTransparentCard,
+            onHomeTransparentCardChange = {
+                coroutineScope.launch {
+                    com.jussicodes.music.data.HomeTransparentCardStore.set(context, it)
+                }
+            },
         )
     }
 
@@ -639,11 +838,15 @@ fun SettingsScreen(navController: NavHostController) {
         )
     }
 
-    if (showLocalSourceDialog) {
+    if (showDirectSourceDialog) {
         LocalSourceDialog(
-            currentSource = localSource,
-            onDismiss = { showLocalSourceDialog = false },
-            onSourceSelected = { localSource = it }
+            currentSource = directSource,
+            onDismiss = { showDirectSourceDialog = false },
+            onSourceSelected = { selected ->
+                directSource = selected
+                showDirectSourceDialog = false
+                reloadCurrentSong()
+            }
         )
     }
 
@@ -680,6 +883,23 @@ fun SettingsScreen(navController: NavHostController) {
                 }
             },
             onSourceSelected = { githubDownloadSource = it }
+        )
+    }
+
+    if (bgSelectFailureReason != null) {
+        AlertDialog(
+            onDismissRequest = { bgSelectFailureReason = null },
+            title = { Text("选取图片失败") },
+            text = {
+                Text(
+                    text = "原因：${bgSelectFailureReason}\n\n多为该图片源不可用（文件被删/移动，或临时读授权失效），请重选一张。",
+                    modifier = Modifier
+                        .verticalScroll(rememberScrollState())
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { bgSelectFailureReason = null }) { Text("知道了") }
+            }
         )
     }
 
@@ -736,12 +956,26 @@ fun SettingsScreen(navController: NavHostController) {
 private fun SettingGroupCard(group: SettingGroupData) {
     val colors = MaterialTheme.colorScheme
     Column {
-        Text(
-            text = group.name,
-            style = MaterialTheme.typography.titleSmall,
-            color = colors.primary,
-            modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = group.name,
+                style = MaterialTheme.typography.titleSmall,
+                color = colors.primary,
+                modifier = Modifier.padding(start = 6.dp, bottom = 6.dp)
+            )
+            Spacer(Modifier.weight(1f))
+            group.subtitle?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.onSurfaceVariant,
+                    modifier = Modifier.padding(end = 8.dp, bottom = 6.dp)
+                )
+            }
+        }
         Card(
             shape = RoundedCornerShape(16.dp),
             colors = CardDefaults.cardColors(containerColor = colors.surfaceContainer)
@@ -755,15 +989,15 @@ private fun SettingGroupCard(group: SettingGroupData) {
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
                     )
                 }
-                group.items.forEachIndexed { index, item ->
-                    SettingRow(item)
-                    if (index < group.items.lastIndex) {
-                        HorizontalDivider(
-                            modifier = Modifier.padding(start = 62.dp, end = 14.dp),
-                            thickness = 1.dp,
-                            color = colors.outlineVariant.copy(alpha = 0.5f)
-                        )
+                // 各选项之间不再画横向分割线（HorizontalDivider），靠行内 56dp 最小高度 +
+                // 卡片底色区分；同组多行直接相邻堆叠。
+                group.header?.let {
+                    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        it()
                     }
+                }
+                group.items.forEach { item ->
+                    SettingRow(item)
                 }
             }
         }
@@ -788,21 +1022,25 @@ private fun SettingRow(item: SettingItemData) {
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(
-                    if (item.danger) colors.errorContainer else colors.surfaceVariant
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = item.imageVector,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp),
-                tint = if (item.danger) colors.error else colors.primary
-            )
+        if (item.iconContent != null) {
+            item.iconContent()
+        } else {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        if (item.danger) colors.errorContainer else colors.surfaceVariant
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = item.imageVector,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = if (item.danger) colors.error else colors.primary
+                )
+            }
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
@@ -843,6 +1081,20 @@ private fun SettingRow(item: SettingItemData) {
     }
 }
 
+/** 行尾齿轮：18dp 裸 Icon + clickable，footprint 与默认右箭头完全一致，故与其他箭头行右对齐。 */
+@Composable
+private fun GearButton(contentDescription: String, onClick: () -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    Icon(
+        imageVector = SettingsGear,
+        contentDescription = contentDescription,
+        modifier = Modifier
+            .size(18.dp)
+            .clickable(onClick = onClick),
+        tint = colors.onSurfaceVariant
+    )
+}
+
 data class SettingItemData(
     val title: String,
     val subtitle: String? = null,
@@ -851,12 +1103,17 @@ data class SettingItemData(
     val trailingContent: @Composable (() -> Unit)? = null,
     val danger: Boolean = false,
     val warning: String? = null,
+    /** 自定义图标（头像等）；给了就用它，忽略 [imageVector]。 */
+    val iconContent: (@Composable () -> Unit)? = null,
 )
 
 data class SettingGroupData(
     val name: String,
     val items: List<SettingItemData>,
     val note: String? = null,
+    val subtitle: String? = null,
+    /** 卡片上方/下方的自定义内容（如音源三选一小卡片）。 */
+    val header: (@Composable () -> Unit)? = null
 )
 
 @Composable
@@ -868,9 +1125,10 @@ private fun GitHubDownloadSourceDialog(
     onRefresh: () -> Unit,
     onSourceSelected: (String) -> Unit,
 ) {
+    ScaledDialogContent {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("更新源") },
+        title = { Text("更换更新源") },
         text = {
             Column {
                 if (testing) {
@@ -922,6 +1180,7 @@ private fun GitHubDownloadSourceDialog(
             }
         }
     )
+    }
 }
 
 /**
@@ -969,6 +1228,7 @@ private fun ApiServerPingDialog(
         newServer = ""
     }
 
+    ScaledDialogContent {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("API 服务器") },
@@ -1132,6 +1392,7 @@ private fun ApiServerPingDialog(
             }
         }
     )
+    }
 }
 
 @Composable
@@ -1142,6 +1403,7 @@ private fun CookieEditDialog(
 ) {
     var editedCookie by rememberSaveable(currentCookie) { mutableStateOf(currentCookie) }
 
+    ScaledDialogContent {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("账号 Cookie") },
@@ -1176,6 +1438,7 @@ private fun CookieEditDialog(
             }
         }
     )
+    }
 }
 
 private fun String.toCookieHeader(): String {

@@ -3,6 +3,7 @@ package com.jussicodes.music.ui.screen
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,6 +60,7 @@ import com.jussicodes.music.LocalPlayerController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.R
 import com.jussicodes.music.constants.searchTopListFilterIdsKey
+import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.constants.topListEnabledKey
 import com.jussicodes.music.extensions.addSong
 import com.jussicodes.music.ui.components.AlbumListItem
@@ -105,6 +107,8 @@ fun SearchScreen(
     val playerState = LocalPlayerState.current
     val isPlaying = playerState?.isPlaying == true
     val currentMediaId = playerState?.currentMediaItem?.mediaId?.toLongOrNull()
+    // 小播放器是否显示（有歌在队列）：列表末尾避让空白块只在有歌时留
+    val hasMiniPlayer = (playerState?.player?.mediaItemCount ?: 0) != 0
     val searchHistoryState by searchViewModel.searchHistory.collectAsState(initial = emptyList())
     val suggestKeywordResponseState by searchViewModel.suggestKeywordResponse.collectAsState()
     val focusManager = LocalFocusManager.current
@@ -146,6 +150,7 @@ fun SearchScreen(
     Box(
         Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .semantics { isTraversalGroup = true }) {
         SearchBar(
             modifier = Modifier
@@ -349,6 +354,11 @@ fun SearchScreen(
                     }
 
                     item {
+                        // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                        if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
+                    }
+
+                    item {
                         Spacer(Modifier.navigationBarsPadding())
                     }
                 }
@@ -487,6 +497,11 @@ fun SearchScreen(
                                         }
                                     }
                                 }
+                            }
+
+                            item {
+                                // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                                if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
                             }
 
                             item {

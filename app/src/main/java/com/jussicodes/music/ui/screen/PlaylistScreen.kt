@@ -84,9 +84,11 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.MediaMetadata
 import androidx.navigation.NavHostController
+import com.jussicodes.music.ui.navigation.UserNav
 import com.jussicodes.music.LocalPlayerController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MediaSessionConstants
+import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.R
 import com.jussicodes.music.data.favoriteSongIdsDatastore
 import com.jussicodes.music.extensions.playMediaAt
@@ -141,6 +143,8 @@ fun PlaylistScreen(
     val playerState = LocalPlayerState.current
     val isPlaying = playerState?.isPlaying == true
     val currentMediaId = playerState?.currentMediaItem?.mediaId?.toLongOrNull()
+    // 小播放器是否显示（有歌在队列）：列表末尾避让空白块只在有歌时留
+    val hasMiniPlayer = (playerState?.player?.mediaItemCount ?: 0) != 0
     val playlistInfoState by playlistScreenViewModel.playlistInfo.collectAsState()
     var openBottomSheet by rememberSaveable { mutableStateOf(false) }
     var openPlaylistComments by rememberSaveable { mutableStateOf(false) }
@@ -538,6 +542,11 @@ fun PlaylistScreen(
                             )
                         }
                     }
+
+                    item {
+                        // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                        if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
+                    }
                 }
             }
         }
@@ -704,7 +713,11 @@ fun PlaylistScreen(
                 mediaId = playlist.id,
                 mediaMetadata = playlistMetadata,
                 commentType = 2,
-                onBackPressed = { openPlaylistComments = false }
+                onBackPressed = { openPlaylistComments = false },
+                onUserClick = { userId ->
+                    openPlaylistComments = false
+                    navController.navigate(UserNav(userId = userId))
+                }
             )
         }
     }

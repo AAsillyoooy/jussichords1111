@@ -6,15 +6,19 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.jussicodes.music.constants.pinnedAlbumIdsKey
+import com.jussicodes.music.constants.pinnedAlbumColumnsKey
 import com.jussicodes.music.constants.pinnedAlbumsAccountKey
 import com.jussicodes.music.constants.pinnedAlbumsCacheKey
+import com.jussicodes.music.constants.pinnedAlbumsHiddenKey
 import com.jussicodes.music.constants.userIdKye
 import com.jussicodes.music.utils.dataStore
 import com.rcmiku.ncmapi.api.album.AlbumApi
 import com.rcmiku.ncmapi.model.Album
 import com.rcmiku.ncmapi.model.Song
 import com.rcmiku.ncmapi.utils.json
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -54,6 +58,24 @@ object PinnedAlbumStore {
 
     private val _albums = MutableStateFlow<List<Album>>(emptyList())
     val albums: StateFlow<List<Album>> = _albums.asStateFlow()
+
+    /**
+     * 专辑墙关闭标志（进程级）：null = DataStore 尚未出值；出值后持续跟 DataStore 回流。
+     * 提到单例是因为 LibraryScreen 在 tab 切换重组合时 remember 会复位——"首帧不渲染卡片"
+     * 的门控若跟着复位，切回主页就会先闪一帧空墙再弹满（用户反馈的"闪一下"）。
+     */
+    private val _hiddenState = MutableStateFlow<Boolean?>(null)
+    val hiddenState: StateFlow<Boolean?> = _hiddenState.asStateFlow()
+
+    private val watcherScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /** 启动时调用一次：持续跟 DataStore 的关闭标志回流进 [hiddenState]。 */
+    fun watchHidden(context: Context) {
+        val ds = context.applicationContext.dataStore
+        watcherScope.launch {
+            ds.data.collect { prefs -> _hiddenState.value = prefs[pinnedAlbumsHiddenKey] ?: false }
+        }
+    }
 
     /** 磁盘缓存是否已读完（冷启动首帧为 false；UI 用它区分"还没到"与"确实为空"）。 */
     private val _cacheLoaded = MutableStateFlow(false)
@@ -171,6 +193,29 @@ object PinnedAlbumStore {
             }
             true
         }
+    }
+
+    /**
+     * 专辑墙封面列数（进程级，null = DataStore 尚未出值）：
+     * 与 [hiddenState] 同款提到单例——卡片若用 rememberPreference 首帧出默认 3 列、
+     * 下一帧才回流真实列数，从任意界面回主页的每次重组合都会把 grid 重排一次
+     * （"专辑墙非 3 列时回主页要动一下"的根因）；进程级状态跨 tab 切换稳定。
+     */
+    private val _columnsState = MutableStateFlow<Int?>(null)
+    val columnsState: StateFlow<Int?> = _columnsState.asStateFlow()
+
+    /** 启动时调用一次：持续跟 DataStore 的列数回流进 [columnsState]。 */
+    fun watchColumns(context: Context) {
+        val ds = context.applicationContext.dataStore
+        watcherScope.launch {
+            ds.data.collect { prefs -> _columnsState.value = prefs[pinnedAlbumColumnsKey] ?: 3 }
+        }
+    }
+
+    /** 写列数（DataStore），watcher 回流后 UI 自动跟上。 */
+    suspend fun setColumns(value: Int) {
+        val s = store ?: return
+        s.edit { it[pinnedAlbumColumnsKey] = value }
     }
 
     /** 置顶 / 取消置顶单个专辑（内存 + 落盘；新增时顺带拉取详情 + 曲目）。 */

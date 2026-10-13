@@ -2,6 +2,7 @@ package com.jussicodes.music.ui.screen
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -60,6 +61,7 @@ import coil3.compose.AsyncImage
 import com.jussicodes.music.LocalPlayerController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MediaSessionConstants
+import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.R
 import com.jussicodes.music.extensions.playMediaAtId
 import com.jussicodes.music.extensions.setPlaylist
@@ -106,6 +108,8 @@ fun ArtistScreen(
     val haptics = LocalHapticFeedback.current
     val isPlaying = playerState?.isPlaying == true
     val currentMediaId = playerState?.currentMediaItem?.mediaId?.toLongOrNull()
+    // 小播放器是否显示（有歌在队列）：列表末尾避让空白块只在有歌时留
+    val hasMiniPlayer = (playerState?.player?.mediaItemCount ?: 0) != 0
 
     // 三个 tab（探索/歌曲/专辑）改成左右滑动：HorizontalPager + 跟手指示器 + 相邻页左右预览，
     // 与“最近播放”页同一套 SwipableTabPager。头部（封面 + 信息行）固定在 tab 行上方。
@@ -117,7 +121,9 @@ fun ArtistScreen(
         ?: artistHeadInfoState?.data?.artist?.picUrl
     val avatarUrl = artistHeadInfoState?.data?.artist?.picUrl ?: heroUrl
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // 实色底：撤掉 NavHost 全局纯色后，主页背景层在 MainScreen 渲染，
+    // 本页根布局需自带不透明底，避免背景透出。
+    Column(modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
         // 固定头部：歌手封面 hero（不随 tab 内容滚动）
         Box(
             modifier = Modifier.fillMaxWidth(),
@@ -245,6 +251,11 @@ fun ArtistScreen(
                                     }
                             )
                         }
+                    }
+
+                    item {
+                        // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                        if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
                     }
                 }
 
@@ -384,6 +395,11 @@ fun ArtistScreen(
                             }
                         }
                     }
+
+                    item {
+                        // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                        if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
+                    }
                 }
 
                 else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
@@ -401,6 +417,11 @@ fun ArtistScreen(
                                     }
                             )
                         }
+                    }
+
+                    item {
+                        // 小播放器避让：有歌时末尾垫 64dp，最后一行不被悬浮播放器盖住
+                        if (hasMiniPlayer) Spacer(modifier = Modifier.height(MiniPlayerHeight))
                     }
                 }
             }

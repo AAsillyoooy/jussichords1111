@@ -59,7 +59,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -104,6 +103,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.abs
 import androidx.navigation.NavHostController
+import com.jussicodes.music.ui.navigation.UserNav
 
 private const val ROAM_PLAYER = 0
 private const val ROAM_LYRIC = 1
@@ -404,7 +404,11 @@ fun RoamScreen(
             PlayerComments(
                 mediaId = mediaId?.toLongOrNull(),
                 mediaMetadata = metadata,
-                onBackPressed = { openComments = false }
+                onBackPressed = { openComments = false },
+                onUserClick = { userId ->
+                    openComments = false
+                    navController.navigate(UserNav(userId = userId))
+                }
             )
         }
     }
@@ -489,7 +493,7 @@ private fun RoamPlayerContent(
 
     Surface(
         modifier = containerModifier.fillMaxSize(),
-        color = Color.Transparent
+        color = MaterialTheme.colorScheme.background
     ) {
         Box(modifier = Modifier.fillMaxSize()) {
             Column(

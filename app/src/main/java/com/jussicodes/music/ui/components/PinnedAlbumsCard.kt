@@ -176,7 +176,7 @@ fun PinnedAlbumsCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.extraLarge,
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = transparentCardColor())
     ) {
         Column(
@@ -257,7 +257,7 @@ fun PinnedAlbumsCard(
                 albums = displayed,
                 editing = editing,
                 columns = columns,
-                cardShape = MaterialTheme.shapes.extraLarge,
+                cardShape = RoundedCornerShape(16.dp),
                 reorderableState = reorderableState,
                 gridState = gridState,
                 view = view,

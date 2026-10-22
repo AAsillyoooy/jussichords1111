@@ -11,12 +11,11 @@ import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -92,7 +91,6 @@ import com.jussicodes.music.ui.components.PinnedAlbumPickDialog
 import com.jussicodes.music.ui.components.PinnedAlbumsCard
 import com.jussicodes.music.ui.components.TopBar
 import com.jussicodes.music.ui.components.resolveHomeBgTextColor
-import com.jussicodes.music.ui.icons.Favorite
 import com.jussicodes.music.ui.icons.History
 import com.jussicodes.music.ui.icons.Leaderboard
 import com.jussicodes.music.ui.icons.Login
@@ -238,7 +236,7 @@ fun LibraryScreen(
                     modifier = Modifier
                         .padding(24.dp)
                         .clickable { navController.navigate(Screen.Login.route) },
-                    shape = MaterialTheme.shapes.extraLarge,
+                    shape = RoundedCornerShape(16.dp),
                     colors = CardDefaults.cardColors(containerColor = transparentCardColor())
                 ) {
                     Column(
@@ -775,11 +773,11 @@ private fun LibraryUserCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.extraLarge,
-        // 磨砂薄玻璃：开开关 = surface+primary 轻染的半透明玻璃（见 userCardGlassColor）；
-        // 关开关 = surfaceContainerLow 不透明实底。
-        // 描边走 Card 的 border 参数而不是在内容里垫 Box——垫 Box 会占一行布局、
-        // 把内容往下推，且描边画在卡片内部而非卡片边缘。
+        shape = RoundedCornerShape(16.dp),
+        // 容器色恒为不透明 surfaceContainerLow：「主页透明卡片」开关不作用于信息卡
+        // （见 userCardGlassColor 注释）。但开关开启时其他卡都透明成一片，信息卡
+        // 作为唯一实底块需要一条细描边交代边界——走 Card 的 border 参数而不是在
+        // 内容里垫Box：垫 Box 会占一行布局、把内容往下推，且描边画在卡片内部。
         border = if (HomeTransparentCardStore.state.collectAsState().value) {
             BorderStroke(
                 width = 1.dp,
@@ -812,7 +810,7 @@ private fun LibraryUserCard(
                         model = profile.avatarUrl.withAvatarCacheBuster(avatarCacheVersion),
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier.clip(CircleShape).border(3.dp, MaterialTheme.colorScheme.surface, CircleShape).size(76.dp)
+                        modifier = Modifier.clip(CircleShape).size(76.dp)
                     )
                     if (profile.vipType != 0) {
                         Box(
@@ -1012,7 +1010,7 @@ private fun FavoritePlaylistCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.extraLarge,
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = transparentCardColor())
     ) {
         Box(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(14.dp)) {
@@ -1030,16 +1028,6 @@ private fun FavoritePlaylistCard(
                     }
                 }
             )
-            Box(
-                modifier = Modifier.align(Alignment.BottomStart).padding(start = 38.dp, top = 38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)).padding(5.dp)
-            ) {
-                androidx.compose.material3.Icon(
-                    imageVector = Favorite,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(12.dp)
-                )
-            }
         }
     }
 }
@@ -1076,7 +1064,7 @@ private fun PlaylistGroupCard(
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.extraLarge,
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = transparentCardColor())
     ) {
         Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {

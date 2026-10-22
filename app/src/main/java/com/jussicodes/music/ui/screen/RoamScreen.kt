@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -69,12 +70,17 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import com.jussicodes.music.animation.MotionSpring
 import androidx.media3.common.C
 import androidx.media3.common.Player
 import coil3.compose.AsyncImage
 import com.jussicodes.music.LocalPlayerController
 import com.jussicodes.music.LocalPlayerState
-import com.jussicodes.music.constants.DURATION_EXIT_SHORT
+import com.jussicodes.music.animation.AlbumArtBoundsTransform
+import com.jussicodes.music.animation.MotionDuration
+import com.jussicodes.music.animation.MotionSpec
+import com.jussicodes.music.animation.PlayerPanelTransition
+import com.jussicodes.music.animation.SharedArtwork
 import com.jussicodes.music.constants.MediaSessionConstants
 import com.jussicodes.music.data.favoriteSongIdsDatastore
 import com.jussicodes.music.extensions.playMediaAt
@@ -241,7 +247,7 @@ fun RoamScreen(
         AnimatedContent(
             targetState = if (metadata == null) ROAM_PLAYER else shownPanel,
             transitionSpec = {
-                fadeIn(tweenEnter()) togetherWith fadeOut(tweenExit())
+                fadeIn(MotionSpec.panelFadeIn<Float>(delayMillis = MotionDuration.PanelFadeIn)) togetherWith fadeOut(MotionSpec.panelFadeOut<Float>())
             }
         ) { target ->
             if (target == ROAM_LYRIC && metadata != null) {
@@ -251,7 +257,7 @@ fun RoamScreen(
                     onBackPressed = { shownPanel = ROAM_PLAYER },
                     imageModifier = Modifier.sharedElement(
                         state = rememberSharedContentState(
-                            key = "roamArtwork-${metadata.artworkUri ?: metadata.title}"
+                            key = SharedArtwork.ofMetadata(metadata)
                         ),
                         animatedVisibilityScope = this@AnimatedContent,
                         placeHolderSize = SharedTransitionScope.PlaceHolderSize.animatedSize,
@@ -262,16 +268,16 @@ fun RoamScreen(
                 PlayerQueue(
                     mediaMetadata = metadata,
                     modifier = Modifier.sharedBounds(
-                        sharedContentState = rememberSharedContentState(key = "roamContainer"),
+                        sharedContentState = rememberSharedContentState(key = PlayerPanelTransition.ROAM_CONTAINER_KEY),
                         animatedVisibilityScope = this@AnimatedContent,
                         placeHolderSize = SharedTransitionScope.PlaceHolderSize.animatedSize,
                         boundsTransform = AlbumArtBoundsTransform,
-                        enter = fadeIn(tweenEnter(delayMillis = DURATION_EXIT_SHORT)),
-                        exit = fadeOut(tweenExit(durationMillis = DURATION_EXIT_SHORT))
+                        enter = fadeIn(MotionSpec.panelFadeIn<Float>(delayMillis = MotionDuration.ScreenExit)),
+                        exit = fadeOut(MotionSpec.panelFadeOut<Float>())
                     ),
                     imageModifier = Modifier.sharedElement(
                         state = rememberSharedContentState(
-                            key = "roamArtwork-${metadata.artworkUri ?: metadata.title}"
+                            key = SharedArtwork.ofMetadata(metadata)
                         ),
                         animatedVisibilityScope = this@AnimatedContent,
                         placeHolderSize = SharedTransitionScope.PlaceHolderSize.animatedSize,
@@ -286,16 +292,16 @@ fun RoamScreen(
                     position = position,
                     duration = duration,
                     modifier = Modifier.sharedBounds(
-                        sharedContentState = rememberSharedContentState(key = "roamContainer"),
+                        sharedContentState = rememberSharedContentState(key = PlayerPanelTransition.ROAM_CONTAINER_KEY),
                         animatedVisibilityScope = this@AnimatedContent,
                         placeHolderSize = SharedTransitionScope.PlaceHolderSize.animatedSize,
                         boundsTransform = AlbumArtBoundsTransform,
-                        enter = fadeIn(tweenEnter(delayMillis = DURATION_EXIT_SHORT)),
-                        exit = fadeOut(tweenExit(durationMillis = DURATION_EXIT_SHORT))
+                        enter = fadeIn(MotionSpec.panelFadeIn<Float>(delayMillis = MotionDuration.ScreenExit)),
+                        exit = fadeOut(MotionSpec.panelFadeOut<Float>())
                     ),
                     imageModifier = Modifier.sharedElement(
                         state = rememberSharedContentState(
-                            key = "roamArtwork-${metadata.artworkUri ?: metadata.title}"
+                            key = SharedArtwork.ofMetadata(metadata)
                         ),
                         animatedVisibilityScope = this@AnimatedContent,
                         placeHolderSize = SharedTransitionScope.PlaceHolderSize.animatedSize,
@@ -379,7 +385,7 @@ fun RoamScreen(
                     artworkModifier = if (metadata?.artworkUri != null) {
                         Modifier.sharedElement(
                             state = rememberSharedContentState(
-                                key = "roamArtwork-${metadata.artworkUri ?: metadata.title}"
+                                key = SharedArtwork.ofMetadata(metadata)
                             ),
                             animatedVisibilityScope = this@AnimatedContent,
                             placeHolderSize = SharedTransitionScope.PlaceHolderSize.animatedSize,
@@ -389,12 +395,12 @@ fun RoamScreen(
                         Modifier
                     },
                     containerModifier = Modifier.sharedBounds(
-                        sharedContentState = rememberSharedContentState(key = "roamContainer"),
+                        sharedContentState = rememberSharedContentState(key = PlayerPanelTransition.ROAM_CONTAINER_KEY),
                         animatedVisibilityScope = this@AnimatedContent,
                         placeHolderSize = SharedTransitionScope.PlaceHolderSize.animatedSize,
                         boundsTransform = AlbumArtBoundsTransform,
-                        enter = fadeIn(tweenEnter(delayMillis = DURATION_EXIT_SHORT)),
-                        exit = fadeOut(tweenExit(durationMillis = DURATION_EXIT_SHORT))
+                        enter = fadeIn(MotionSpec.panelFadeIn<Float>(delayMillis = MotionDuration.ScreenExit)),
+                        exit = fadeOut(MotionSpec.panelFadeOut<Float>())
                     ),
                     selectedModeIndex = selectedModeIndex
                 )
@@ -465,10 +471,7 @@ private fun RoamPlayerContent(
             animate(
                 initialValue = coverOffsetX,
                 targetValue = target,
-                animationSpec = spring(
-                    dampingRatio = 0.85f,
-                    stiffness = 450f
-                )
+                animationSpec = MotionSpring.artworkHorizontal
             ) { value, _ ->
                 coverOffsetX = value
             }
@@ -481,10 +484,7 @@ private fun RoamPlayerContent(
             animate(
                 initialValue = coverOffsetY,
                 targetValue = target,
-                animationSpec = spring(
-                    dampingRatio = 0.85f,
-                    stiffness = 480f
-                )
+                animationSpec = MotionSpring.artworkDismiss
             ) { value, _ ->
                 coverOffsetY = value
             }
@@ -521,7 +521,26 @@ private fun RoamPlayerContent(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // 顶部来源标签：始终展示当前模式（"私人 FM · 探索"），点击展开模式菜单
+                // 左侧占位（48dp IconButton 等宽），保证来源标签在顶栏正中
+                Spacer(modifier = Modifier.width(48.dp))
+                // 右上：更多菜单
+                IconButton(onClick = { modeMenuExpanded = true }) {
+                    Icon(
+                        imageVector = Icons.Outlined.MoreVert,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            // 顶部来源标签：始终展示当前模式（"私人 FM · 探索"），点击展开模式菜单。
+            // 悬浮在顶栏正中（覆盖层），不参与 Row 两端布局。
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center
+            ) {
                 Box {
                     Text(
                         text = "私人 FM · ${personalFmModeOptions[selectedModeIndex].title}",
@@ -551,13 +570,6 @@ private fun RoamPlayerContent(
                             )
                         }
                     }
-                }
-                IconButton(onClick = { modeMenuExpanded = true }) {
-                    Icon(
-                        imageVector = Icons.Outlined.MoreVert,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary
-                    )
                 }
             }
 

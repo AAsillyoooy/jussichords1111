@@ -25,11 +25,13 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -58,7 +60,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
@@ -80,6 +81,8 @@ import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.constants.apiBaseUrlKey
 import com.jussicodes.music.constants.apiServerListKey
 import com.jussicodes.music.constants.audioQualityKey
+import com.jussicodes.music.constants.cacheAutoCleanEnabledKey
+import com.jussicodes.music.constants.cacheAutoCleanThresholdKey
 import com.jussicodes.music.constants.desktopLyricEnabledKey
 import com.jussicodes.music.constants.ignoredUpdateVersionKey
 import com.jussicodes.music.constants.audioSourceKey
@@ -122,6 +125,7 @@ import com.jussicodes.music.ui.icons.UserRound
 import com.jussicodes.music.ui.navigation.Screen
 import com.jussicodes.music.ui.theme.ThemeColorSource
 import com.jussicodes.music.utils.AppUpdateManager
+import com.jussicodes.music.utils.CacheManager
 import com.jussicodes.music.utils.SettingsAppearanceBus
 import com.jussicodes.music.utils.NcmCookieNormalizer
 import com.jussicodes.music.utils.ApiServerStatus
@@ -133,14 +137,16 @@ import com.jussicodes.music.utils.UpdateSourceStatus
 import com.jussicodes.music.utils.apiServers
 import com.jussicodes.music.utils.downloadSources
 import com.jussicodes.music.utils.rememberEnumPreference
-import com.jussicodes.music.utils.rememberPreference
 import com.jussicodes.music.utils.sourceById
+import com.jussicodes.music.utils.rememberPreference
 import com.rcmiku.ncmapi.api.account.AccountApi
 import com.rcmiku.ncmapi.api.AudioSources
 import com.rcmiku.ncmapi.api.LocalSources
 import com.rcmiku.ncmapi.api.player.PlayerApi
 import com.jussicodes.music.lx.AudioSourceSwitcher
 import com.jussicodes.music.ui.components.AudioSourceSelector
+import com.jussicodes.music.ui.components.CacheManagerDialog
+import com.jussicodes.music.ui.components.cacheSubtitle
 import com.jussicodes.music.ui.components.LocalSourceDialog
 import com.rcmiku.ncmapi.api.player.SongLevel
 import com.rcmiku.ncmapi.utils.json
@@ -309,6 +315,26 @@ fun SettingsScreen(navController: NavHostController) {
     var showQualityDialog by remember { mutableStateOf(false) }
     var showUnblockSourceDialog by remember { mutableStateOf(false) }
     var showDirectSourceDialog by remember { mutableStateOf(false) }
+    var showCacheDialog by remember { mutableStateOf(false) }
+    // 「缓存」：进设置页先异步测一次当前占用，之后开弹窗/清理后刷新。
+    var cacheSnapshot by remember { mutableStateOf<CacheManager.Snapshot?>(null) }
+    var cacheMeasuring by remember { mutableStateOf(false) }
+    var cacheClearing by remember { mutableStateOf(false) }
+    var cacheAutoCleanEnabled by rememberPreference(cacheAutoCleanEnabledKey, false)
+    var cacheAutoCleanThreshold by rememberPreference(cacheAutoCleanThresholdKey, 1024L * 1024 * 1024)
+    val cacheSubtitle = cacheSubtitle(
+        enabled = cacheAutoCleanEnabled,
+        thresholdBytes = cacheAutoCleanThreshold,
+        currentBytes = cacheSnapshot?.totalBytes ?: 0L,
+    )
+    fun refreshCache() {
+        if (cacheMeasuring) return
+        cacheMeasuring = true
+        coroutineScope.launch {
+            cacheSnapshot = CacheManager.measure(context)
+            cacheMeasuring = false
+        }
+    }
 
 
 
@@ -434,6 +460,12 @@ fun SettingsScreen(navController: NavHostController) {
                 }
             }
         }
+    }
+
+    // 「缓存」：进设置页先测一次当前占用（副标题显示），弹窗打开时再刷新一次。
+    LaunchedEffect(Unit) { refreshCache() }
+    LaunchedEffect(showCacheDialog) {
+        if (showCacheDialog) refreshCache()
     }
 
     // 桌面歌词有效开关 = 存储开启 && 悬浮窗权限已授予
@@ -590,6 +622,12 @@ fun SettingsScreen(navController: NavHostController) {
                 },
                 imageVector = AudioLines,
                 onClick = { showQualityDialog = true }
+            ),
+            SettingItemData(
+                title = "缓存",
+                subtitle = cacheSubtitle,
+                imageVector = Icons.Outlined.Storage,
+                onClick = { showCacheDialog = true }
             )
         )
     )
@@ -757,6 +795,34 @@ fun SettingsScreen(navController: NavHostController) {
             currentLevel = audioQuality,
             onDismiss = { showQualityDialog = false },
             onQualitySelected = { audioQuality = it }
+        )
+    }
+
+    if (showCacheDialog) {
+        CacheManagerDialog(
+            snapshot = cacheSnapshot,
+            measuring = cacheMeasuring,
+            clearing = cacheClearing,
+            autoCleanEnabled = cacheAutoCleanEnabled,
+            autoCleanThresholdBytes = cacheAutoCleanThreshold,
+            onMeasure = { refreshCache() },
+            onClear = {
+                cacheClearing = true
+                coroutineScope.launch {
+                    val ok = CacheManager.clear(context)
+                    cacheClearing = false
+                    // 清理后再测一次，让环形图/副标题立刻反映新占用（含索引未即时释放的残余）。
+                    cacheSnapshot = CacheManager.measure(context)
+                    Toast.makeText(
+                        context,
+                        if (ok) "缓存已清理" else "部分缓存清理失败，可重试",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            },
+            onAutoCleanEnabledChange = { cacheAutoCleanEnabled = it },
+            onThresholdSelected = { cacheAutoCleanThreshold = it },
+            onDismiss = { showCacheDialog = false },
         )
     }
 

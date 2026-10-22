@@ -14,7 +14,7 @@ import com.jussicodes.music.data.HomeTransparentCardStore
  * 用于收藏歌单卡 / 歌单组卡 / 专辑墙。
  *
  * 这些卡在开关开启时是**全透明**的（背景图/壁纸直接透出），不需要玻璃配方，
- * 用 [Color.Transparent] 即可；磨砂与 tint 只给用户信息卡（见 [userCardGlassColor]）。
+ * 用 [Color.Transparent] 即可。
  */
 @Composable
 fun transparentCardColor(): Color {
@@ -23,17 +23,17 @@ fun transparentCardColor(): Color {
 }
 
 /**
- * 用户信息卡容器色：开 = 轻透磨砂薄玻璃，关 = surfaceContainerLow（与改前一致）。
+ * 用户信息卡容器色：开「卡片透明」= 轻透磨砂薄玻璃，关 = surfaceContainerLow（与改前一致）。
  *
  * 玻璃配方（与 ArtworkGlassBackdrop 同一套视觉语言，保证全 App 玻璃质感一致）：
  *   1. 底色 surface：不选纯白/纯黑，选主题 surface，深色主题下不会发灰发闷；
  *   2. 主色 tint：极低 alpha 的 primary，让卡片随壁纸/封面取色走，有「染色玻璃」感；
  *   3. 整体 alpha 压得很低（深色 0.30 / 浅色 0.42）：轻透，背景图若隐若现，
  *      同时保证 onSurface 文字的对比度足够（不会出现白字压白底）。
+ *   4. 配合 LibraryUserCard 的 1dp 白色细描边（开关开启时）勾出边缘，玻璃才有轮廓。
  *
  * 历史问题：旧实现深色用 Color(0xFFFFFFFF).copy(alpha = 0.18f)，白色 alpha 在
- * 深色背景上显得发灰发脏，浅色主题下又几乎不可见。改为 surface + primary tint
- * 后，深浅色都有稳定的玻璃观感，且 alpha 高于旧值，不会再出现「几乎看不见」。
+ * 深色背景上显得发灰发脏，浅色主题下又几乎不可见。
  */
 @Composable
 fun userCardGlassColor(): Color {

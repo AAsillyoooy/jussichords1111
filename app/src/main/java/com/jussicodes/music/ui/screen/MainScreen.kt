@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -80,13 +81,16 @@ import androidx.navigation.compose.rememberNavController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MediaSessionConstants
 import com.jussicodes.music.constants.BottomNavigationHeight
-import com.jussicodes.music.constants.DURATION_ENTER
-import com.jussicodes.music.constants.DURATION_EXIT
-import com.jussicodes.music.constants.DURATION_EXIT_SHORT
-import com.jussicodes.music.constants.EmphasizedDecelerateEasing
+import com.jussicodes.music.animation.MotionDuration
+import com.jussicodes.music.animation.MotionSpec
+import com.jussicodes.music.animation.MotionDefaults
+import com.jussicodes.music.animation.rememberTabSelectionVisuals
 import com.jussicodes.music.constants.MiniPlayerHeight
 import com.jussicodes.music.constants.currentPlayMediaIdKey
+import com.jussicodes.music.constants.useNavigationRailLayout
 import com.jussicodes.music.data.HomeBgEditor
+import com.jussicodes.music.ui.components.AdaptiveContent
+import com.jussicodes.music.ui.components.AdaptiveNavigationRail
 import com.jussicodes.music.ui.components.HomeBackgroundLayer
 import com.jussicodes.music.ui.components.HomeBgEditPanel
 import com.jussicodes.music.ui.components.rememberHomeBackground
@@ -102,7 +106,6 @@ import com.jussicodes.music.utils.SettingsAppearanceBus
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -131,12 +134,28 @@ fun MainScreen() {
     val homePagerState = rememberPagerState(initialPage = homePage) { tabs.size }
     val coroutineScope = rememberCoroutineScope()
     val isHomeRoute = isTabRoute
+    // 壁纸层可见性：isTabRoute 去抖版（见 AnimatedVisibility 处的注释）。
+    // 进二级页仍会淡出，但 tab<->tab 切换的中间假false 帧被滤掉，壁纸不再闪。
+    var homeBackgroundVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(isTabRoute) {
+        if (isTabRoute) {
+            homeBackgroundVisible = true
+        } else {
+            delay(200)
+            homeBackgroundVisible = isTabRoute
+        }
+    }
     val isRoamRoute = currentDestination?.route == Screen.Roam.route
     val showNavigationBar = isTabRoute
     // 贴底输入框的页面（私信聊天页）自己通过 MiniPlayerHiddenBus 声明"我在时需要隐藏小播放条"，
     // 不再用 destination.route 字符串匹配（类型安全参数路由的 route 格式不可靠，已踩坑三次）。
     val miniPlayerHidden by MiniPlayerHiddenBus.hidden.collectAsState()
     val showMiniPlayerChrome = showMiniPlayer && !isRoamRoute && !miniPlayerHidden
+    // 响应式：横屏手机（矮屏 914x411dp）也要左侧竖排导航栏 —— 411dp 高度放
+    // 底部横条会吃掉 1/6 可视高度。判定逻辑集中在 useNavigationRailLayout()。
+    val useNavigationRail = useNavigationRailLayout()
+    // 走侧栏时导航不再占底部，内容区应贴系统导航栏而不是留出底栏高度。
+    val navBarTakesBottomSpace = showNavigationBar && !useNavigationRail
     // 主页背景（"我的"/"探索"底层）：提升到 MainScreen 全屏层渲染，布局与 bottomPadding
     // 解耦——路由切换时不再随内容区高度突变重裁切（"背景跟着小播放器下滑"的根因）。
     val homeBackground = rememberHomeBackground()
@@ -205,11 +224,18 @@ fun MainScreen() {
         }
     }
 
+    // 从二级页返回/跳到某个首页 tab 时，把 pager 对到那一页。
+    //只在「上一个路由不是 tab 路由」时才强制 scrollToPage：首页内部路由恒为
+    // Library（pager 不再反调 navigateRootTab），若这里无条件 scroll 回index 0，
+    // 从二级页返回就会把用户原本停在「探索」的 pager 拽回「我的」。
+    var previousRoute by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(currentDestination?.route) {
-        val targetPage = tabs.indexOfFirst { it.route == currentDestination?.route }
-            .takeIf { it >= 0 }
-
-        if (targetPage != null) {
+        val route = currentDestination?.route
+        val cameFromNonTab = previousRoute != null &&
+            tabs.none { tab -> tab.route == previousRoute }
+        previousRoute = route
+        val targetPage = tabs.indexOfFirst { it.route == route }.takeIf { it >= 0 }
+        if (targetPage != null && cameFromNonTab) {
             homePage = targetPage
             homePageScroll = targetPage.toFloat()
             if (homePagerState.currentPage != targetPage || homePagerState.currentPageOffsetFraction != 0f) {
@@ -229,14 +255,21 @@ fun MainScreen() {
     }
 
     LaunchedEffect(homePagerState.settledPage) {
-        // Keep the navigation route in sync with the settled home page: the
-        // pager can settle on 我的/探索 without the route changing, and a stale
-        // route made back/return from detail pages land on the wrong home tab.
-        if (!isTabRoute) return@LaunchedEffect
-        val tabRoute = tabs.getOrNull(homePagerState.settledPage)?.route ?: return@LaunchedEffect
-        if (currentDestination?.route != tabRoute) {
-            navigateRootTab(tabRoute)
-        }
+        // pager 落页后只同步内存态 homePage/homePageScroll，**不再反调 navigateRootTab**。
+        //
+        // 为什么去掉：Library 与 Explore 是 NavHost 里两个独立 destination，各自
+        // compose 一个完整的 HomePager。任何一次 navigateRootTab(Library/Explore) 都会
+        // 销毁旧 destination 的整棵子树、重新构建 LibraryScreen（新 ViewModel →
+        // userInfo 回 null、AsyncImage 重载、Card 重建），玻璃信息卡在过场那几帧透出
+        // 的不是壁纸而是窗口底色/旧内容 → 读成「闪一下才变透明」。快速 fling 划动必然
+        // 触发（settle 在动画中段），慢速拖动重建发生在页面已静止时所以不明显。
+        //
+        // 现在路由恒为起始 destination Library，pager 只在内部换页，不再重建。
+        // 二级页返回时落点由下面的 LaunchedEffect(currentDestination?.route) +
+        // rememberPagerState(rememberSaveable homePage) 保证：homePage 记录当前页，
+        // 重建 pager 时从该页起步，底栏指示胶囊本来就跟 homePageScroll 走。
+        homePage = homePagerState.settledPage
+        homePageScroll = homePagerState.settledPage.toFloat()
     }
 
     val snackbarHostState = remember { SnackbarHostState() }
@@ -268,7 +301,9 @@ fun MainScreen() {
             SnackbarHost(hostState = snackbarHostState)
         },
         bottomBar = {
-            Column {
+            // Compact 用底栏；Medium/Expanded 改左侧竖排导航栏（见 content 里的 Row），
+            // 底栏此时不占位，否则大屏上会多出一条空横条。
+            if (!useNavigationRail) Column {
                 AnimatedVisibility(
                     showNavigationBar,
                     enter = expandVertically(),
@@ -284,7 +319,19 @@ fun MainScreen() {
                         BoxWithConstraints(Modifier.fillMaxSize()) {
                             val itemWidth = maxWidth / tabs.size
                             val indicatorWidth = 72.dp
-                            val indicatorOffset = itemWidth * if (isHomeRoute) homePageScroll else homePage.toFloat()
+                            // 指示胶囊：首页由 pager 连续进度跟手直算，用 snap() 让它零延迟贴手指；
+                            // 非首页路由是离散跳转，用 tween 补一段，否则胶囊会瞬移过去。
+                            val rawIndicatorOffset =
+                                itemWidth * if (isHomeRoute) homePageScroll else homePage.toFloat()
+                            val indicatorOffset by animateDpAsState(
+                                targetValue = rawIndicatorOffset,
+                                animationSpec = if (isHomeRoute) {
+                                    snap()
+                                } else {
+                                    MotionSpec.indicatorShift()
+                                },
+                                label = "TabIndicatorOffset"
+                            )
 
                             Box(
                                 modifier = Modifier
@@ -299,30 +346,20 @@ fun MainScreen() {
                             Row(Modifier.fillMaxSize()) {
                                 tabs.forEach { item ->
                                     val tabIndex = tabs.indexOf(item).coerceAtLeast(0)
-                                    val homeProgress = if (isHomeRoute) {
-                                        (1f - abs(homePageScroll - tabIndex)).coerceIn(0f, 1f)
-                                    } else {
-                                        0f
-                                    }
                                     val selected = if (isHomeRoute) {
                                         tabs.getOrNull(homePageScroll.roundToInt())?.route == item.route
                                     } else {
                                         currentDestination?.hierarchy?.any { it.route == item.route } == true
                                     }
-                                    val iconScale = if (isHomeRoute) {
-                                        0.92f + 0.26f * homeProgress
-                                    } else if (selected) {
-                                        1.18f
-                                    } else {
-                                        0.92f
-                                    }
-                                    val iconAlpha = if (isHomeRoute) {
-                                        0.68f + 0.32f * homeProgress
-                                    } else if (selected) {
-                                        1f
-                                    } else {
-                                        0.68f
-                                    }
+                                    // 选中态视觉：首页由 pager 连续进度跟手直算（不补间），
+                                    // 非首页路由切换时走 spring 过渡，避免图标瞬跳。
+                                    // 数值与 NavigationRail 共用 TabSelectionMotion。
+                                    val visuals = rememberTabSelectionVisuals(
+                                        isHomeRoute = isHomeRoute,
+                                        homePageScroll = homePageScroll,
+                                        index = tabIndex,
+                                        selected = selected
+                                    )
 
                                     Box(
                                         modifier = Modifier
@@ -336,17 +373,11 @@ fun MainScreen() {
                                                 if (targetPage < 0) return@clickable
 
                                                 if (isHomeRoute) {
-                                                    coroutineScope.launch {
-                                                        if (homePagerState.targetPage != targetPage || homePagerState.currentPageOffsetFraction != 0f) {
-                                                            homePagerState.animateScrollToPage(
-                                                                page = targetPage,
-                                                                animationSpec = tween(
-                                                                    durationMillis = DURATION_ENTER,
-                                                                    easing = EmphasizedDecelerateEasing
-                                                                )
-                                                            )
-                                                        }
-                                                    }
+                                                    MotionDefaults.animatePagerToPage(
+                                                        pagerState = homePagerState,
+                                                        page = targetPage,
+                                                        scope = coroutineScope
+                                                    )
                                                 } else {
                                                     navigateRootTab(item.route)
                                                 }
@@ -364,9 +395,9 @@ fun MainScreen() {
                                             modifier = Modifier
                                                 .size(28.dp)
                                                 .graphicsLayer {
-                                                    scaleX = iconScale
-                                                    scaleY = iconScale
-                                                    alpha = iconAlpha
+                                                    scaleX = visuals.iconScale
+                                                    scaleY = visuals.iconScale
+                                                    alpha = visuals.iconAlpha
                                                 }
                                         )
                                     }
@@ -382,7 +413,7 @@ fun MainScreen() {
             // 不加额外高度避免和底栏顶开缝），套 200ms 缓入缓出：进出设置页时下滑/回位平滑。
             val targetMiniBottomPadding = when {
                 showPlayer -> 0.dp
-                showNavigationBar -> padding.calculateBottomPadding()
+                navBarTakesBottomSpace -> padding.calculateBottomPadding()
                 else -> WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             }
             // 内容区跟小播放器用同一个贴底间距（无整体垫高）：首页列表的底部避让
@@ -390,7 +421,7 @@ fun MainScreen() {
             val miniBottomPadding by animateDpAsState(
                 targetValue = targetMiniBottomPadding,
                 animationSpec = tween(
-                    durationMillis = DURATION_EXIT,
+                    durationMillis = MotionDuration.LayoutShift,
                     easing = FastOutSlowInEasing
                 ),
                 label = "MiniPlayerBottomPadding"
@@ -401,9 +432,16 @@ fun MainScreen() {
             // 非首页路由时淡出，避免背景色渗入二级页的进入/退出交叉淡入；
             // 二级页各自的实色背景会把它盖住，返回首页再淡入。
             AnimatedVisibility(
-                visible = isTabRoute,
-                enter = fadeIn(tween(DURATION_ENTER)),
-                exit = fadeOut(tween(DURATION_EXIT_SHORT)),
+                // 去抖后的可见性，不是 isTabRoute 本身：navigateRootTab 的
+                // popUpTo(saveState)+restoreState 在 tab<->tab 切换（含 pager 划动
+                // settle 后反调 navigateRootTab）中间会有短暂几帧 currentBackStackEntry
+                // 不在 tab 路由上，isTabRoute 掉 false 又立刻回true。直接用它驱动
+                // 淡入淡出 = 壁纸闪一下，而信息卡是半透明玻璃，叠在淡出的壁纸上
+                // 会被读成「卡片先不透明、再变透明」。只有稳定 delay 窗口后仍是
+                // 非 tab 路由，才认定真的进了二级页。
+                visible = homeBackgroundVisible,
+                enter = fadeIn(MotionSpec.screenEnter()),
+                exit = fadeOut(MotionSpec.screenExit()),
                 label = "HomeBackgroundLayer"
             ) {
                 Box(modifier = Modifier.fillMaxSize()) {
@@ -442,13 +480,40 @@ fun MainScreen() {
                 }
             }
 
-            NavGraph(
-                navController = navController,
-                bottomPadding = miniBottomPadding,
-                homePagerState = homePagerState,
-                onHomePageChange = { homePage = it },
-                onHomePageScroll = { homePageScroll = it }
-            )
+            // Expanded（大屏）左侧竖排导航栏；Compact/Medium 保持底部横条。
+            // 两者只在这里分叉：rail 占左侧固定宽度，内容区限宽居中（AdaptiveContent）。
+            Row(Modifier.fillMaxSize()) {
+                if (useNavigationRail && showNavigationBar) {
+                    AdaptiveNavigationRail(
+                        currentRoute = currentDestination?.route,
+                        isHomeRoute = isHomeRoute,
+                        homePageScroll = homePageScroll,
+                        onTabClick = { route ->
+                            val targetPage = tabs.indexOfFirst { it.route == route }
+                            if (targetPage >= 0 && isHomeRoute) {
+                                MotionDefaults.animatePagerToPage(
+                                    pagerState = homePagerState,
+                                    page = targetPage,
+                                    scope = coroutineScope
+                                )
+                            } else {
+                                navigateRootTab(route)
+                            }
+                        }
+                    )
+                }
+                // weight(1f) 而不是靠 fillMaxSize 撑满：Row 里非 weight 子项只拿到
+                // 「剩余宽度」约束，限宽 + 撑满同时成立时才不会溢出。
+                AdaptiveContent(modifier = Modifier.weight(1f)) {
+                    NavGraph(
+                        navController = navController,
+                        bottomPadding = miniBottomPadding,
+                        homePagerState = homePagerState,
+                        onHomePageChange = { homePage = it },
+                        onHomePageScroll = { homePageScroll = it }
+                    )
+                }
+            }
 
             // 主页背景沉浸式编辑模式：draft 非 null 时接管全屏手势 + 底部参数面板。
             val editingBg = bgDraft
@@ -635,16 +700,16 @@ fun MainScreen() {
                                 bgAdjustMode = false
                                 HomeBgEditor.cancel(context)
                                 // 放弃 → 回设置页并自动打开「外观」弹窗。
-                                // 栈手术：把 Library（home）以上全弹掉再 push Settings，
-                                // Settings 只可能孤立在 home 之下（launchSingleTop 防叠层），
-                                // 之后从 home 按返回不会再冒出残留设置页。
+                                // 栈：保留 Library（home）在栈底，只把 Settings 叠在上面，
+                                // 这样「外观」弹窗关掉后再按返回是回主页，而不是直接退出到桌面。
+                                // （之前用 popUpTo(Library){inclusive=true} 把 home 一起弹掉了，
+                                //  Settings 就成了栈底唯一项 → 返回直接回桌面。）
                                 android.util.Log.d(
                                     "JussicordsBg",
                                     "cancel nav: ${navController.currentBackStack.value.map { it.destination.route }}"
                                 )
                                 SettingsAppearanceBus.request()
                                 navController.navigate(Screen.Settings.route) {
-                                    popUpTo(Screen.Library.route) { inclusive = true }
                                     launchSingleTop = true
                                 }
                             }) {

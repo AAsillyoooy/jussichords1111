@@ -25,11 +25,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.Card
@@ -137,7 +137,6 @@ import com.jussicodes.music.utils.UpdateSourceStatus
 import com.jussicodes.music.utils.apiServers
 import com.jussicodes.music.utils.downloadSources
 import com.jussicodes.music.utils.rememberEnumPreference
-import com.jussicodes.music.utils.sourceById
 import com.jussicodes.music.utils.rememberPreference
 import com.rcmiku.ncmapi.api.account.AccountApi
 import com.rcmiku.ncmapi.api.AudioSources
@@ -530,7 +529,9 @@ fun SettingsScreen(navController: NavHostController) {
                 imageVector = if (loggedOut) Login else Logout,
                 danger = !loggedOut,
                 subtitle = if (loggedOut) null else "当前账号：${accountNickname.ifEmpty { "点击退出" }}",
-                // 已登录时用头像当图标（36dp 圆形），未登录/取不到头像则退回 Logout 图标
+                // 已登录时用头像当图标；未登录/取不到头像则退回 Logout 图标。
+                // 头像槽位跟其他行的图标块完全同款：36dp + 12dp 圆角（SettingRow 的
+                // 图标底块就是 36dp/RoundedCornerShape(12.dp)），弧度与占位都一致。
                 iconContent = if (!loggedOut && accountAvatar.isNotBlank()) {
                     {
                         AsyncImage(
@@ -539,7 +540,7 @@ fun SettingsScreen(navController: NavHostController) {
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .size(36.dp)
-                                .clip(CircleShape)
+                                .clip(RoundedCornerShape(12.dp))
                         )
                     }
                 } else null,
@@ -678,12 +679,31 @@ fun SettingsScreen(navController: NavHostController) {
             SettingItemData(
                 title = "jussichords",
                 subtitle = "简洁的第三方网易云音乐客户端",
-                imageVector = MusicNote
+                imageVector = MusicNote,
+                trailingContent = {
+                    val uri = android.net.Uri.parse("https://github.com/easyTIDollar/jussichords")
+                    Icon(
+                        imageVector = Icons.Outlined.OpenInNew,
+                        contentDescription = "打开项目主页",
+                        modifier = Modifier
+                            .size(18.dp)
+                            .clickable {
+                                runCatching {
+                                    context.startActivity(
+                                        android.content.Intent(
+                                            android.content.Intent.ACTION_VIEW,
+                                            uri
+                                        )
+                                    )
+                                }
+                            },
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             ),
             SettingItemData(
                 title = if (updating) "正在检查" else "检查更新",
-                subtitle = sourceById(githubDownloadSource)?.name?.let { "$it · v${BuildConfig.VERSION_NAME}" }
-                    ?: BuildConfig.VERSION_NAME,
+                subtitle = "v${BuildConfig.VERSION_NAME}",
                 imageVector = Github,
                 onClick = {
                     if (!updating) {

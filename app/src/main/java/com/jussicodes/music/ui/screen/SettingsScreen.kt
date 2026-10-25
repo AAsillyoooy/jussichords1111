@@ -34,6 +34,7 @@ import androidx.compose.material.icons.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -46,7 +47,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.AlertDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -99,6 +99,7 @@ import com.jussicodes.music.constants.homeBgOpacityKey
 import com.jussicodes.music.constants.homeBgScaleKey
 import com.jussicodes.music.constants.themeColorSourceKey
 import com.jussicodes.music.constants.unblockSourceKey
+import com.jussicodes.music.constants.updateLastErrorKey
 import com.jussicodes.music.lyric.DesktopLyricManager
 import com.jussicodes.music.ui.components.ScaledDialogContent
 import com.jussicodes.music.ui.components.Dialog
@@ -129,6 +130,7 @@ import com.jussicodes.music.utils.CacheManager
 import com.jussicodes.music.utils.SettingsAppearanceBus
 import com.jussicodes.music.utils.NcmCookieNormalizer
 import com.jussicodes.music.utils.ApiServerStatus
+import com.jussicodes.music.utils.UpdateCheckCoordinator
 import com.jussicodes.music.utils.UpdateDownloadPhase
 import com.jussicodes.music.utils.UpdateDownloadService
 import com.jussicodes.music.utils.UpdateDownloadStateStore
@@ -153,6 +155,7 @@ import com.rcmiku.ncmapi.utils.parseCookieString
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import java.io.File
+import com.jussicodes.music.ui.components.ResponsiveAlertDialog
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -212,6 +215,8 @@ fun SettingsScreen(navController: NavHostController) {
         "当前正在使用 $inUseLabel"
     }
     var ignoredUpdateVersion by rememberPreference(ignoredUpdateVersionKey, "")
+    // 检查更新的可见状态：只留失败原因（失败不再静默）。
+    var updateLastError by rememberPreference(updateLastErrorKey, "")
     var playerGestureTutorialVersion by rememberPreference(
         playerGestureTutorialVersionKey,
         0
@@ -335,8 +340,6 @@ fun SettingsScreen(navController: NavHostController) {
         }
     }
 
-
-
     // 切换音源后重解析当前播放的歌：清掉 ResolvingDataSource 的解析缓存（cacheKey
     // 只含音质，不含音源），重新 prepare 当前 MediaItem 让它走一遍新的解析链。
     fun reloadCurrentSong() {
@@ -436,14 +439,17 @@ fun SettingsScreen(navController: NavHostController) {
                     updateDownloadProgress = 1f
                     updateDownloadText = "下载完成，正在打开安装器"
                     snapshot.apkPath?.let { apkPath ->
-                        AppUpdateManager.installApk(context, File(apkPath))
-                            .onFailure { throwable ->
-                                Toast.makeText(
-                                    context,
-                                    throwable.message ?: "无法打开安装器",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            }
+                        // 同一份下载只允许拉起一次安装器（主界面也 collect 同一个 store）。
+                        if (UpdateDownloadStateStore.claimInstallLaunch()) {
+                            AppUpdateManager.installApk(context, File(apkPath))
+                                .onFailure { throwable ->
+                                    Toast.makeText(
+                                        context,
+                                        throwable.message ?: "无法打开安装器",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                        }
                     }
                     pendingUpdateInfo = null
                 }
@@ -456,6 +462,12 @@ fun SettingsScreen(navController: NavHostController) {
                         snapshot.message ?: "下载失败",
                         Toast.LENGTH_LONG
                     ).show()
+                }
+                UpdateDownloadPhase.CANCELLED -> {
+                    // 用户主动取消：回到可重新下载状态。
+                    downloadingUpdate = false
+                    updateDownloadProgress = 0f
+                    updateDownloadText = "下载已取消"
                 }
             }
         }
@@ -531,7 +543,8 @@ fun SettingsScreen(navController: NavHostController) {
                 subtitle = if (loggedOut) null else "当前账号：${accountNickname.ifEmpty { "点击退出" }}",
                 // 已登录时用头像当图标；未登录/取不到头像则退回 Logout 图标。
                 // 头像槽位跟其他行的图标块完全同款：36dp + 12dp 圆角（SettingRow 的
-                // 图标底块就是 36dp/RoundedCornerShape(12.dp)），弧度与占位都一致。
+                // 图标底块就是 36dp/RoundedCornerShape(12.dp)），弧度与占位都一致，
+                // 之前头像用 10.dp 圆角 → 和其他行摆一起明显不一样。
                 iconContent = if (!loggedOut && accountAvatar.isNotBlank()) {
                     {
                         AsyncImage(
@@ -704,27 +717,28 @@ fun SettingsScreen(navController: NavHostController) {
             SettingItemData(
                 title = if (updating) "正在检查" else "检查更新",
                 subtitle = "v${BuildConfig.VERSION_NAME}",
+                // 上次检查失败的原因直接挂在这一行：之前失败是完全静默的，
+                // 用户只会看到「没有更新提示」，不知道是被限流还是网络问题。
+                warning = updateLastError.takeIf { it.isNotBlank() },
                 imageVector = Github,
                 onClick = {
                     if (!updating) {
                         updating = true
                         coroutineScope.launch {
-                            val updateResult = AppUpdateManager.checkUpdate()
-                            val updateInfo = updateResult.getOrElse {
+                            // 手动检查强制联网（force=true），无视 6 小时节流窗口。
+                            val outcome = UpdateCheckCoordinator.check(context, force = true)
+                            updating = false
+                            val info = outcome.updateInfo
+                            if (outcome.error != null) {
                                 Toast.makeText(
                                     context,
-                                    it.message ?: "更新失败",
+                                    "更新检查失败：${outcome.error}",
                                     Toast.LENGTH_LONG
                                 ).show()
-                                updating = false
-                                return@launch
-                            }
-
-                            updating = false
-                            if (updateInfo == null) {
+                            } else if (info == null) {
                                 Toast.makeText(context, "当前已是最新版本", Toast.LENGTH_SHORT).show()
                             } else {
-                                pendingUpdateInfo = updateInfo
+                                pendingUpdateInfo = info
                             }
                         }
                     }
@@ -973,7 +987,7 @@ fun SettingsScreen(navController: NavHostController) {
     }
 
     if (bgSelectFailureReason != null) {
-        AlertDialog(
+        ResponsiveAlertDialog(
             onDismissRequest = { bgSelectFailureReason = null },
             title = { Text("选取图片失败") },
             text = {
@@ -1031,6 +1045,12 @@ fun SettingsScreen(navController: NavHostController) {
                     updateInfo,
                     githubDownloadSource
                 )
+            },
+            onCancelDownload = {
+                UpdateDownloadService.cancelDownload()
+                downloadingUpdate = false
+                updateDownloadProgress = 0f
+                updateDownloadText = "下载已取消"
             }
         )
     }
@@ -1212,7 +1232,7 @@ private fun GitHubDownloadSourceDialog(
     onSourceSelected: (String) -> Unit,
 ) {
     ScaledDialogContent {
-    AlertDialog(
+    ResponsiveAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("更换更新源") },
         text = {
@@ -1239,10 +1259,20 @@ private fun GitHubDownloadSourceDialog(
                                 .weight(1f)
                                 .padding(vertical = 8.dp)
                         ) {
-                            Text(source.name, style = MaterialTheme.typography.titleMedium)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(source.name, style = MaterialTheme.typography.titleMedium)
+                                // 测速中：源名后面挂一个小转圈，不写「Ping 中…」文字。
+                                if (testing && status == null) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .padding(start = 6.dp)
+                                            .size(16.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                            }
                             Text(
                                 text = when {
-                                    testing && status == null -> "测速中..."
                                     status == null -> source.detail
                                     status.available -> "可用 · ${status.latencyMs ?: 0} ms"
                                     else -> "不可用 · ${status.message}"
@@ -1262,7 +1292,7 @@ private fun GitHubDownloadSourceDialog(
         },
         dismissButton = {
             TextButton(onClick = onRefresh, enabled = !testing) {
-                Text("重新测速")
+                Text("重新 Ping")
             }
         }
     )
@@ -1273,7 +1303,7 @@ private fun GitHubDownloadSourceDialog(
  * 可增删的 ncmapi 后端列表对话框。
  *
  * 列表持久化在 DataStore（apiServerListKey）：可添加/删除自定义地址。点行或单选
- * 即激活该服务器；「重新测速」并行 Ping 列表全部地址。当前活动服务器若不在列表
+ * 即激活该服务器；「重新 Ping」并行 Ping 列表全部地址。当前活动服务器若不在列表
  * 中，会置顶显示为系统行（不可删除）。
  */
 @Composable
@@ -1315,7 +1345,7 @@ private fun ApiServerPingDialog(
     }
 
     ScaledDialogContent {
-    AlertDialog(
+    ResponsiveAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("API 服务器") },
         text = {
@@ -1417,17 +1447,27 @@ private fun ApiServerPingDialog(
                                     .weight(1f)
                                     .padding(vertical = 8.dp)
                             ) {
-                                Text(
-                                    server,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    overflow = TextOverflow.Ellipsis,
-                                    maxLines = 1
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        server,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        overflow = TextOverflow.Ellipsis,
+                                        maxLines = 1
+                                    )
+                                    // 测速中：地址后面挂一个小转圈，不写「Ping 中…」文字。
+                                    if (testing && status == null) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier
+                                                .padding(start = 6.dp)
+                                                .size(16.dp),
+                                            strokeWidth = 2.dp
+                                        )
+                                    }
+                                }
                                 Text(
                                     text = when {
-                                        testing && status == null -> "测速中..."
                                         status == null ->
-                                            if (server == currentServer) "当前" else "未测"
+                                            if (server == currentServer) "当前" else "未 Ping"
                                         status.available -> "可用 · ${status.latencyMs ?: 0} ms"
                                         else -> "不可用 · ${status.message}"
                                     },
@@ -1474,7 +1514,7 @@ private fun ApiServerPingDialog(
         },
         dismissButton = {
             TextButton(onClick = { runPing(activateFastest = false) }, enabled = !testing) {
-                Text("重新测速")
+                Text("重新 Ping")
             }
         }
     )
@@ -1490,7 +1530,7 @@ private fun CookieEditDialog(
     var editedCookie by rememberSaveable(currentCookie) { mutableStateOf(currentCookie) }
 
     ScaledDialogContent {
-    AlertDialog(
+    ResponsiveAlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("账号 Cookie") },
         text = {

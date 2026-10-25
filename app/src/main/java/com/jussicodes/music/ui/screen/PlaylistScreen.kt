@@ -8,7 +8,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.net.Uri
-import android.icu.text.Transliterator
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -34,7 +33,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -99,6 +97,7 @@ import com.jussicodes.music.ui.components.PlayerComments
 import com.jussicodes.music.ui.components.LargeImageDialog
 import com.jussicodes.music.ui.components.PlaylistThumbnailImage
 import com.jussicodes.music.ui.components.SongListItem
+import com.jussicodes.music.ui.components.rememberFilteredSongs
 import com.jussicodes.music.ui.components.SongMenuBottomSheet
 import com.jussicodes.music.ui.components.SharePayload
 import com.jussicodes.music.ui.components.ShareSheet
@@ -106,6 +105,7 @@ import com.jussicodes.music.ui.icons.LibraryAdd
 import com.jussicodes.music.ui.icons.LibraryAddCheck
 import com.jussicodes.music.ui.icons.ModeComment
 import com.jussicodes.music.ui.icons.Search
+import com.jussicodes.music.constants.isLandscapePhone
 import com.jussicodes.music.constants.userIdKye
 import com.jussicodes.music.utils.formatPlayCount
 import com.jussicodes.music.utils.formatTimestamp
@@ -116,15 +116,13 @@ import com.rcmiku.ncmapi.model.Song
 import com.rcmiku.ncmapi.model.Playlist
 import coil3.compose.AsyncImage
 import java.io.File
-import java.util.Locale
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.withContext
 import androidx.core.view.HapticFeedbackConstantsCompat
 import androidx.core.view.ViewCompat
 import com.jussicodes.music.utils.rememberPreference
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
+import com.jussicodes.music.ui.components.ResponsiveAlertDialog
 
 private const val PLAYLIST_COVER_UPLOAD_SIZE = 300
 
@@ -180,10 +178,14 @@ fun PlaylistScreen(
             selectedCoverUri = it
         }
     }
+    val isLandscape = isLandscapePhone()
+    var showDescriptionOverlay by remember { mutableStateOf(false) }
 
     LaunchedEffect(searchActive) {
         if (searchActive) {
-            searchFocusRequester.requestFocus()
+            // requestFocus 在 requester 尚未挂载到节点时会抛 IllegalStateException
+            // （横屏下搜索框不在顶栏，切屏瞬间可能还没 attach），用 runCatching 兜住。
+            runCatching { searchFocusRequester.requestFocus() }
             keyboardController?.show()
         }
     }
@@ -191,97 +193,88 @@ fun PlaylistScreen(
     with(sharedTransitionScope) {
         Scaffold(
             topBar = {
-                TopAppBar(
-                    title = {
-                        if (searchActive) {
-                            TextField(
-                                value = searchQuery,
-                                onValueChange = { searchQuery = it },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .focusRequester(searchFocusRequester),
-                                placeholder = { Text(stringResource(R.string.search)) },
-                                singleLine = true,
-                                colors = TextFieldDefaults.colors(
-                                    focusedContainerColor = MaterialTheme.colorScheme.surface,
-                                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
-                                    focusedIndicatorColor = MaterialTheme.colorScheme.primary,
-                                    unfocusedIndicatorColor = MaterialTheme.colorScheme.outlineVariant
-                                )
-                            )
-                        } else {
-                            Text(
-                                if (showPlaylistTitle) playlistTitle else stringResource(R.string.playlist),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = {
+                // 横屏（矮屏）走主从双栏：顶栏收进左栏顶部，这里不显示顶栏。
+                if (!isLandscape) {
+                    TopAppBar(
+                        title = {
                             if (searchActive) {
-                                searchActive = false
-                                searchQuery = ""
-                                keyboardController?.hide()
+                                TextField(
+                                    value = searchQuery,
+                                    onValueChange = { searchQuery = it },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .focusRequester(searchFocusRequester),
+                                    placeholder = { Text(stringResource(R.string.search)) },
+                                    singleLine = true,
+                                    colors = TextFieldDefaults.colors(
+                                        focusedContainerColor = MaterialTheme.colorScheme.surface,
+                                        unfocusedContainerColor = MaterialTheme.colorScheme.surface,
+                                        focusedIndicatorColor = MaterialTheme.colorScheme.primary,
+                                        unfocusedIndicatorColor = MaterialTheme.colorScheme.outlineVariant
+                                    )
+                                )
                             } else {
-                                navController.navigateUp()
-                            }
-                        }) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = null
-                            )
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = {
-                            searchActive = !searchActive
-                            if (!searchActive) {
-                                searchQuery = ""
-                                keyboardController?.hide()
-                            }
-                        }) {
-                            Icon(
-                                imageVector = Search,
-                                contentDescription = stringResource(R.string.search)
-                            )
-                        }
-                        Box {
-                            IconButton(onClick = { playlistMenuExpanded = true }) {
-                                Icon(
-                                    imageVector = Icons.Default.MoreVert,
-                                    contentDescription = stringResource(R.string.more)
+                                Text(
+                                    if (showPlaylistTitle) playlistTitle else stringResource(R.string.playlist),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
-                            DropdownMenu(
-                                expanded = playlistMenuExpanded,
-                                onDismissRequest = { playlistMenuExpanded = false }
-                            ) {
-                                val isOwnPlaylist = playlistDetailState?.playlist?.creator?.userId == userId
-                                if (isOwnPlaylist) {
-                                    DropdownMenuItem(
-                                        text = { Text("编辑信息") },
-                                        onClick = {
-                                            val playlist = playlistDetailState?.playlist
-                                            playlistMenuExpanded = false
-                                            if (playlist != null) {
-                                                editPlaylistName = playlist.name
-                                                editPlaylistDescription = playlist.description
-                                                showEditPlaylistDialog = true
-                                            }
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("上传封面") },
-                                        onClick = {
-                                            playlistMenuExpanded = false
-                                            coverPicker.launch("image/*")
-                                        }
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = {
+                                if (searchActive) {
+                                    searchActive = false
+                                    searchQuery = ""
+                                    keyboardController?.hide()
+                                } else {
+                                    navController.navigateUp()
+                                }
+                            }) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = null
+                                )
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = {
+                                searchActive = !searchActive
+                                if (!searchActive) {
+                                    searchQuery = ""
+                                    keyboardController?.hide()
+                                }
+                            }) {
+                                Icon(
+                                    imageVector = Search,
+                                    contentDescription = stringResource(R.string.search)
+                                )
+                            }
+                            Box {
+                                IconButton(onClick = { playlistMenuExpanded = true }) {
+                                    Icon(
+                                        imageVector = Icons.Default.MoreVert,
+                                        contentDescription = stringResource(R.string.more)
                                     )
                                 }
-                                DropdownMenuItem(
-                                    text = { Text("分享歌单") },
-                                    onClick = {
+                                PlaylistOverflowMenu(
+                                    expanded = playlistMenuExpanded,
+                                    onDismiss = { playlistMenuExpanded = false },
+                                    isOwnPlaylist = playlistDetailState?.playlist?.creator?.userId == userId,
+                                    onEditInfo = {
+                                        val playlist = playlistDetailState?.playlist
+                                        playlistMenuExpanded = false
+                                        if (playlist != null) {
+                                            editPlaylistName = playlist.name
+                                            editPlaylistDescription = playlist.description
+                                            showEditPlaylistDialog = true
+                                        }
+                                    },
+                                    onUploadCover = {
+                                        playlistMenuExpanded = false
+                                        coverPicker.launch("image/*")
+                                    },
+                                    onShare = {
                                         val detail = playlistDetailState?.playlist
                                         playlistMenuExpanded = false
                                         if (detail != null) {
@@ -300,9 +293,9 @@ fun PlaylistScreen(
                                     }
                                 )
                             }
-                        }
-                    },
-                )
+                        },
+                    )
+                }
             }
         ) { padding ->
             if (playlistDetailState == null) {
@@ -314,6 +307,178 @@ fun PlaylistScreen(
                 ) {
                     CircularProgressIndicator()
                 }
+            }
+            if (isLandscape) {
+                // 横屏（矮屏）：主从双栏 —— 左 40% 展示栏，右 60% 曲目列表。
+                playlistDetailState?.let { detail ->
+                    val serverTracks = detail.playlist.getAllTracks()
+                    LaunchedEffect(detail.playlist.id, serverTracks.map { song -> song.id }) {
+                        if (!songOrderChanged) {
+                            reorderedTracks = serverTracks
+                        }
+                    }
+                    val tracks = reorderedTracks ?: serverTracks
+                    val visibleTracks = rememberFilteredSongs(tracks, searchQuery)
+                    val currentPlaylistId = detail.playlist.id
+                    val currentPlaylistName = detail.playlist.name
+                    PlaylistLandscapeBody(
+                        playlistName = detail.playlist.name,
+                        metaText = stringResource(
+                            R.string.total_play_count,
+                            formatPlayCount(detail.playlist.playCount)
+                        ) + " " + formatTimestamp(detail.playlist.trackUpdateTime),
+                        description = detail.playlist.description,
+                        cover = {
+                            with(sharedTransitionScope) {
+                                AsyncImage(
+                                    model = detail.playlist.coverImgUrl.withPlaylistCoverCacheBuster(
+                                        playlistCoverVersions[detail.playlist.id] ?: 0L
+                                    ),
+                                    contentDescription = detail.playlist.name,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier
+                                        .sharedElement(
+                                            sharedTransitionScope.rememberSharedContentState(key = detail.playlist.id),
+                                            animatedVisibilityScope = animatedContentScope,
+                                            placeHolderSize = { contentSize: IntSize, animatedSize: IntSize ->
+                                                IntSize(contentSize.width, animatedSize.height)
+                                            },
+                                            boundsTransform = AlbumArtBoundsTransform,
+                                        )
+                                        .fillMaxSize()
+                                        .clip(MaterialTheme.shapes.large)
+                                        .clickable {
+                                            previewCoverUrl = detail.playlist.coverImgUrl
+                                                .withPlaylistCoverCacheBuster(
+                                                    playlistCoverVersions[detail.playlist.id] ?: 0L
+                                                )
+                                        }
+                                )
+                            }
+                        },
+                        isSubscribed = subscribed,
+                        songs = visibleTracks,
+                        isPlaying = isPlaying,
+                        currentMediaId = currentMediaId,
+                        likedSongIds = songIds,
+                        hasMiniPlayer = hasMiniPlayer,
+                        onToggleSubscribe = {
+                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                            playlistScreenViewModel.playlistSub(shouldSubscribe = !subscribed)
+                        },
+                        onPlayAll = {
+                            mediaController?.setPlaylist(
+                                tracks,
+                                sourceId = currentPlaylistId,
+                                sourceName = currentPlaylistName,
+                                sourceType = MediaSessionConstants.SOURCE_TYPE_PLAYLIST,
+                                navId = currentPlaylistId
+                            )
+                            mediaController?.playMediaAt()
+                        },
+                        onComments = { openPlaylistComments = true },
+                        onSongClick = { song ->
+                            mediaController?.setPlaylist(
+                                tracks,
+                                sourceId = currentPlaylistId,
+                                sourceName = currentPlaylistName,
+                                sourceType = MediaSessionConstants.SOURCE_TYPE_PLAYLIST,
+                                navId = currentPlaylistId
+                            )
+                            mediaController?.playMediaAtId(song.id)
+                        },
+                        onSongMenu = { song ->
+                            selectSong = song
+                            openBottomSheet = true
+                        },
+                        onTitleClick = { showDescriptionOverlay = true },
+                        descriptionOverlayVisible = showDescriptionOverlay,
+                        onDescriptionOverlayDismiss = { showDescriptionOverlay = false },
+                        topActions = {
+                            IconButton(onClick = {
+                                if (searchActive) {
+                                    searchActive = false
+                                    searchQuery = ""
+                                    keyboardController?.hide()
+                                } else {
+                                    navController.navigateUp()
+                                }
+                            }) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                    contentDescription = null
+                                )
+                            }
+                            Spacer(Modifier.weight(1f))
+                            IconButton(onClick = {
+                                searchActive = !searchActive
+                                if (!searchActive) {
+                                    searchQuery = ""
+                                    keyboardController?.hide()
+                                }
+                            }) {
+                                Icon(
+                                    imageVector = Search,
+                                    contentDescription = stringResource(R.string.search)
+                                )
+                            }
+                            Box {
+                                IconButton(onClick = { playlistMenuExpanded = true }) {
+                                    Icon(
+                                        imageVector = Icons.Default.MoreVert,
+                                        contentDescription = stringResource(R.string.more)
+                                    )
+                                }
+                                PlaylistOverflowMenu(
+                                    expanded = playlistMenuExpanded,
+                                    onDismiss = { playlistMenuExpanded = false },
+                                    isOwnPlaylist = detail.playlist.creator?.userId == userId,
+                                    onEditInfo = {
+                                        playlistMenuExpanded = false
+                                        editPlaylistName = detail.playlist.name
+                                        editPlaylistDescription = detail.playlist.description
+                                        showEditPlaylistDialog = true
+                                    },
+                                    onUploadCover = {
+                                        playlistMenuExpanded = false
+                                        coverPicker.launch("image/*")
+                                    },
+                                    onShare = {
+                                        playlistMenuExpanded = false
+                                        sharePayload = SharePayload.PlaylistShare(
+                                            Playlist(
+                                                id = detail.playlist.id,
+                                                name = detail.playlist.name,
+                                                coverImgUrl = detail.playlist.coverImgUrl,
+                                                creator = detail.playlist.creator,
+                                                description = detail.playlist.description,
+                                                trackCount = detail.playlist.trackCount,
+                                                playCount = detail.playlist.playCount,
+                                                specialType = detail.playlist.specialType
+                                            )
+                                        )
+                                    }
+                                )
+                            }
+                        },
+                        listHeader = {
+                            if (searchActive) {
+                                OutlinedTextField(
+                                    value = searchQuery,
+                                    onValueChange = { searchQuery = it },
+                                    placeholder = { Text(stringResource(R.string.search)) },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .focusRequester(searchFocusRequester)
+                                        .padding(horizontal = 12.dp, vertical = 4.dp)
+                                )
+                            }
+                        },
+                        modifier = Modifier.padding(padding)
+                    )
+                }
+                return@Scaffold
             }
             playlistDetailState?.let {
                 val serverTracks = it.playlist.getAllTracks()
@@ -581,7 +746,7 @@ fun PlaylistScreen(
     }
 
     if (showEditPlaylistDialog) {
-        AlertDialog(
+        ResponsiveAlertDialog(
             onDismissRequest = { showEditPlaylistDialog = false },
             title = { Text("编辑歌单") },
             text = {
@@ -631,7 +796,7 @@ fun PlaylistScreen(
     }
 
     selectedCoverUri?.let { uri ->
-        AlertDialog(
+        ResponsiveAlertDialog(
             onDismissRequest = { selectedCoverUri = null },
             title = { Text("编辑封面") },
             text = {
@@ -724,67 +889,39 @@ fun PlaylistScreen(
     }
 }
 
-private class PlaylistSongSearchEntry(song: Song) {
-    val song = song
-    private val title = song.name.toSearchText()
-    private val artists = song.ar.joinToString(" ") { it.name }.toSearchText()
-    private val initials = buildString {
-        append(song.name.toInitials())
-        append(' ')
-        song.ar.forEach { artist ->
-            append(artist.name.toInitials())
-            append(' ')
-        }
-    }
-
-    fun matches(normalizedQuery: String): Boolean {
-        if (normalizedQuery.isBlank()) return true
-        return title.contains(normalizedQuery) ||
-            artists.contains(normalizedQuery) ||
-            initials.contains(normalizedQuery)
-    }
-}
-
-private fun String.toSearchText(): String =
-    lowercase(Locale.ROOT).filter { it.isLetterOrDigit() }
-
-private fun String.toInitials(): String =
-    PinyinInitialTransliterator.transliterate(this)
-        .split(' ', '-', '_', '/', '\\', '.', ',', '(', ')', '[', ']', '·')
-        .mapNotNull { word -> word.firstOrNull { it.isLetterOrDigit() } }
-        .joinToString("")
-        .lowercase(Locale.ROOT)
-
 /**
- * Filters [tracks] for in-list search without blocking the UI thread.
- * The pinyin search index (ICU transliteration per song and artist) is built
- * on [Dispatchers.Default]. When no query is active the full list is returned
- * as-is, so merely opening a large playlist does no per-song work at all;
- * filtering only runs against the pre-computed index once a query is entered.
+ * 歌单「更多」下拉菜单（编辑信息 / 上传封面 / 分享歌单）。
+ *
+ * 竖屏顶栏与横屏左栏顶部共用同一个菜单，避免两处逻辑漂移。
  */
 @Composable
-private fun rememberFilteredSongs(tracks: List<Song>, query: String): List<Song> {
-    val normalizedQuery = remember(query) { query.toSearchText() }
-    var index by remember(tracks) { mutableStateOf<PlaylistSearchIndex?>(null) }
-    LaunchedEffect(tracks) {
-        index = withContext(Dispatchers.Default) { tracks.toSearchIndex() }
+private fun PlaylistOverflowMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    isOwnPlaylist: Boolean,
+    onEditInfo: () -> Unit,
+    onUploadCover: () -> Unit,
+    onShare: () -> Unit,
+) {
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss
+    ) {
+        if (isOwnPlaylist) {
+            DropdownMenuItem(
+                text = { Text("编辑信息") },
+                onClick = onEditInfo
+            )
+            DropdownMenuItem(
+                text = { Text("上传封面") },
+                onClick = onUploadCover
+            )
+        }
+        DropdownMenuItem(
+            text = { Text("分享歌单") },
+            onClick = onShare
+        )
     }
-    return when {
-        normalizedQuery.isBlank() -> tracks
-        index == null -> tracks
-        else -> index!!.filter(normalizedQuery)
-    }
-}
-
-private fun List<Song>.toSearchIndex(): PlaylistSearchIndex =
-    PlaylistSearchIndex(map(::PlaylistSongSearchEntry))
-
-private class PlaylistSearchIndex(private val entries: List<PlaylistSongSearchEntry>) {
-    fun filter(normalizedQuery: String): List<Song> =
-        entries.asSequence()
-            .filter { it.matches(normalizedQuery) }
-            .map { it.song }
-            .toList()
 }
 
 private fun Uri.copyToPlaylistCoverCache(context: Context, scale: Float, offset: Offset): File? {
@@ -822,12 +959,4 @@ private fun Uri.copyToPlaylistCoverCache(context: Context, scale: Float, offset:
         } ?: return null
         file
     }.getOrNull()
-}
-
-private object PinyinInitialTransliterator {
-    private val transliterator by lazy {
-        Transliterator.getInstance("Han-Latin/Names; Latin-ASCII")
-    }
-
-    fun transliterate(value: String): String = transliterator.transliterate(value)
 }

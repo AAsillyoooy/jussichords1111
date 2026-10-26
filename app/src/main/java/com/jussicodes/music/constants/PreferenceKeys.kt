@@ -9,6 +9,18 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 val ncmCookieKey = stringPreferencesKey("ncmCookie")
 val use40DpIconKey = booleanPreferencesKey("use40DpIcon")
 val desktopLyricEnabledKey = booleanPreferencesKey("desktopLyricEnabled")
+// 桌面歌词外观与位置（Service 与设置页共用）。字号单位 sp；颜色是 ARGB Int。
+val desktopLyricFontSizeKey = floatPreferencesKey("desktopLyricFontSize")
+val desktopLyricTextColorKey = intPreferencesKey("desktopLyricTextColor")
+val desktopLyricStrokeColorKey = intPreferencesKey("desktopLyricStrokeColor")
+// 描边粗细倍数：0=不描边，1=默认，最大 2。
+val desktopLyricStrokeScaleKey = floatPreferencesKey("desktopLyricStrokeScale")
+val desktopLyricLockedKey = booleanPreferencesKey("desktopLyricLocked")
+// 位置存归一化比例（0..1，相对可移动范围），换机/横竖屏/分屏都能还原。
+val desktopLyricXFractionKey = floatPreferencesKey("desktopLyricXFraction")
+val desktopLyricYFractionKey = floatPreferencesKey("desktopLyricYFraction")
+// 设置页预览背景：用户自选图片的本地路径，空=用内置默认图。
+val desktopLyricPreviewBgKey = stringPreferencesKey("desktopLyricPreviewBg")
 val currentPlayMediaIdKey = longPreferencesKey("currentPlayMediaId")
 val autoSkipNextOnErrorKey = booleanPreferencesKey("autoSkipNextOnError")
 val audioQualityKey = stringPreferencesKey("audioQuality")

@@ -35,9 +35,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.AddPhotoAlternate
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
@@ -55,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.FilterQuality
@@ -67,6 +68,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -85,17 +87,22 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import com.jussicodes.music.ui.components.transparentCardColor
 import com.jussicodes.music.ui.components.userCardGlassColor
+import com.jussicodes.music.ui.components.JussiDropdownMenu
+import com.jussicodes.music.ui.components.JussiMenuItem
 import com.jussicodes.music.ui.components.LargeImageDialog
 import com.jussicodes.music.ui.components.PinnedAlbumPickDialog
 import com.jussicodes.music.ui.components.PinnedAlbumsCard
 import com.jussicodes.music.ui.components.TopBar
 import com.jussicodes.music.ui.components.resolveHomeBgTextColor
+import com.jussicodes.music.ui.icons.Delete
+import com.jussicodes.music.ui.icons.Favorite
 import com.jussicodes.music.ui.icons.History
 import com.jussicodes.music.ui.icons.Leaderboard
 import com.jussicodes.music.ui.icons.Login
 import com.jussicodes.music.ui.icons.Message
 import com.jussicodes.music.ui.icons.MoreVert
 import com.jussicodes.music.ui.icons.PersonalRadio
+import com.jussicodes.music.ui.icons.Pencil
 import com.jussicodes.music.ui.icons.PlaylistAdd
 import com.jussicodes.music.ui.icons.VipFill
 import com.jussicodes.music.ui.navigation.AlbumNav
@@ -255,6 +262,14 @@ fun LibraryScreen(
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface
                         )
+                        // 说明：点进去是内嵌 WebView 的网易云登录页，登录成功后自动抓取
+                        // MUSIC_U 等 cookie 落盘（也可在登录页右上角手贴 cookie）。
+                        Text(
+                            text = "点击跳转webview登录获取cookie",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
                     }
                 }
             }
@@ -330,16 +345,16 @@ fun LibraryScreen(
                                 )
                             },
                             menuItems = listOf(
-                                PlaylistMenuItem("编辑信息") { playlist ->
+                                PlaylistMenuItem("编辑信息", icon = Pencil) { playlist ->
                                     editingPlaylist = playlist
                                     editingPlaylistName = playlist.name
                                     editingPlaylistDescription = playlist.description
                                 },
-                                PlaylistMenuItem("上传封面") { playlist ->
+                                PlaylistMenuItem("上传封面", icon = Icons.Outlined.AddPhotoAlternate) { playlist ->
                                     coverEditingPlaylist = playlist
                                     coverPicker.launch("image/*")
                                 },
-                                PlaylistMenuItem("删除歌单") { playlist ->
+                                PlaylistMenuItem("删除歌单", icon = Delete, destructive = true) { playlist ->
                                     libraryScreenViewModel.deletePlaylist(playlist) { success ->
                                         Toast.makeText(
                                             context,
@@ -381,7 +396,7 @@ fun LibraryScreen(
                                 )
                             },
                             menuItems = listOf(
-                                PlaylistMenuItem("取消收藏") { playlist ->
+                                PlaylistMenuItem("取消收藏", icon = Favorite) { playlist ->
                                     libraryScreenViewModel.uncollectPlaylist(playlist) { success ->
                                         Toast.makeText(
                                             context,
@@ -1151,13 +1166,15 @@ private fun LibraryPlaylistRow(
                             contentDescription = stringResource(R.string.more)
                         )
                     }
-                    DropdownMenu(
+                    JussiDropdownMenu(
                         expanded = menuExpanded,
                         onDismissRequest = { menuExpanded = false }
                     ) {
                         menuItems.forEach { item ->
-                            DropdownMenuItem(
-                                text = { Text(item.text) },
+                            JussiMenuItem(
+                                text = item.text,
+                                icon = item.icon,
+                                destructive = item.destructive,
                                 onClick = {
                                     menuExpanded = false
                                     item.onClick(playlist)
@@ -1173,6 +1190,8 @@ private fun LibraryPlaylistRow(
 
 private data class PlaylistMenuItem(
     val text: String,
+    val icon: ImageVector? = null,
+    val destructive: Boolean = false,
     val onClick: (Playlist) -> Unit
 )
 

@@ -39,6 +39,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import androidx.datastore.preferences.core.edit
 import com.google.common.collect.ImmutableList
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
@@ -53,6 +54,7 @@ import com.jussicodes.music.constants.audioEffectSpeedKey
 import com.jussicodes.music.constants.audioQualityKey
 import com.jussicodes.music.constants.autoSkipNextOnErrorKey
 import com.jussicodes.music.constants.desktopLyricEnabledKey
+import com.jussicodes.music.constants.desktopLyricLockedKey
 import com.jussicodes.music.constants.use40DpIconKey
 import com.jussicodes.music.data.favoriteSongIdsDatastore
 import com.jussicodes.music.extensions.updateMediaItemUri
@@ -95,6 +97,7 @@ class PlaybackService : MediaSessionService() {
     private var favoriteSongIds: List<Long> by mutableStateOf(emptyList())
     private val use40DpIcon by preference(this, use40DpIconKey, false)
     private val desktopLyricEnabled by preference(this, desktopLyricEnabledKey, false)
+    private val desktopLyricLocked by preference(this, desktopLyricLockedKey, false)
     private val audioQuality by enumPreference(this, audioQualityKey, SongLevel.STANDARD)
 
     private var playbackHistoryReporter: PlaybackHistoryReporter? = null
@@ -217,12 +220,43 @@ class PlaybackService : MediaSessionService() {
             .setSessionCommand(MediaSessionConstants.CommandToggleDesktopLyric)
             .build()
 
-    private val desktopLyricButtonOn: CommandButton
+    /** 未锁定 → 显示「锁」图标，点一下锁定。 */
+    private val desktopLyricLockButton: CommandButton
         get() = CommandButton.Builder(ICON_UNDEFINED)
-            .setCustomIconResId(R.drawable.ic_lyrics_on)
-            .setDisplayName("desktop_lyric_on")
-            .setSessionCommand(MediaSessionConstants.CommandToggleDesktopLyric)
+            .setCustomIconResId(R.drawable.ic_lyric_lock)
+            .setDisplayName("desktop_lyric_lock")
+            .setSessionCommand(MediaSessionConstants.CommandToggleDesktopLyricLock)
             .build()
+
+    /** 已锁定 → 显示「开锁」图标，点一下解锁。 */
+    private val desktopLyricUnlockButton: CommandButton
+        get() = CommandButton.Builder(ICON_UNDEFINED)
+            .setCustomIconResId(R.drawable.ic_lyric_unlock)
+            .setDisplayName("desktop_lyric_unlock")
+            .setSessionCommand(MediaSessionConstants.CommandToggleDesktopLyricLock)
+            .build()
+
+    /**
+     * 通知栏 / 系统媒体卡片的自定义按钮组合。
+     *
+     * 系统媒体卡片只放得下 5 个按钮（上一首 / 播放暂停 / 下一首 + 2 个自定义），
+     * 所以这里固定只给 2 个自定义按钮：桌面歌词关着时是「开启歌词」，
+     * 开着时这个位置让给「锁定 / 解锁」（开关本身在设置页里）。
+     */
+    private fun currentCustomLayout(): ImmutableList<CommandButton> {
+        val liked = favoriteSongIds.contains(
+            mediaSession?.player?.currentMediaItem?.mediaId?.toLong()
+        )
+        val builder = ImmutableList.builder<CommandButton>()
+            .add(if (liked) favoriteButtonOn else favoriteButton)
+        if (desktopLyricEnabled) {
+            // 图标表示当前状态：已锁定显示「锁」，未锁定显示「开锁」，点一下切换。
+            builder.add(if (desktopLyricLocked) desktopLyricLockButton else desktopLyricUnlockButton)
+        } else {
+            builder.add(desktopLyricButton)
+        }
+        return builder.build()
+    }
 
     private val scope = CoroutineScope(Dispatchers.Main) + SupervisorJob()
 
@@ -491,12 +525,7 @@ class PlaybackService : MediaSessionService() {
                     PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                 )
             ).setCallback(MediaSessionCallback())
-            .setCustomLayout(
-                ImmutableList.of(
-                    favoriteButton,
-                    if (desktopLyricEnabled) desktopLyricButtonOn else desktopLyricButton
-                )
-            )
+            .setCustomLayout(currentCustomLayout())
             .build()
         observeIconPreference()
         observeFavoriteSongIds()
@@ -543,12 +572,7 @@ class PlaybackService : MediaSessionService() {
         mediaSession
 
     fun updateCustomLayout() {
-        mediaSession?.setCustomLayout(
-            ImmutableList.of(
-                if (favoriteSongIds.contains(mediaSession?.player?.currentMediaItem?.mediaId?.toLong())) favoriteButtonOn else favoriteButton,
-                if (desktopLyricEnabled) desktopLyricButtonOn else desktopLyricButton
-            )
-        )
+        mediaSession?.setCustomLayout(currentCustomLayout())
     }
 
     override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
@@ -595,7 +619,9 @@ class PlaybackService : MediaSessionService() {
     private fun observeDesktopLyricPreference() {
         scope.launch {
             applicationContext.dataStore.data.debounce(300)
-                .map { it[desktopLyricEnabledKey] ?: false }
+                .map {
+                    (it[desktopLyricEnabledKey] ?: false) to (it[desktopLyricLockedKey] ?: false)
+                }
                 .distinctUntilChanged()
                 .collect {
                     updateCustomLayout()
@@ -651,6 +677,7 @@ class PlaybackService : MediaSessionService() {
                         .add(MediaSessionConstants.CommandToggleLike)
                         .add(MediaSessionConstants.CommandToggleShuffle)
                         .add(MediaSessionConstants.CommandToggleDesktopLyric)
+                        .add(MediaSessionConstants.CommandToggleDesktopLyricLock)
                         .build()
                 )
                 .build()
@@ -688,6 +715,14 @@ class PlaybackService : MediaSessionService() {
                             Toast.LENGTH_SHORT
                         ).show()
                     }
+                }
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            if (customCommand.customAction == MediaSessionConstants.ACTION_TOGGLE_DESKTOP_LYRIC_LOCK) {
+                scope.launch {
+                    val locked = applicationContext.dataStore.get(desktopLyricLockedKey, false)
+                    applicationContext.dataStore.edit { it[desktopLyricLockedKey] = !locked }
+                    updateCustomLayout()
                 }
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }

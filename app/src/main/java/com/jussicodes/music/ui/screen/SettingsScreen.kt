@@ -84,6 +84,8 @@ import com.jussicodes.music.constants.audioQualityKey
 import com.jussicodes.music.constants.cacheAutoCleanEnabledKey
 import com.jussicodes.music.constants.cacheAutoCleanThresholdKey
 import com.jussicodes.music.constants.desktopLyricEnabledKey
+import com.jussicodes.music.constants.desktopLyricFontSizeKey
+import com.jussicodes.music.constants.desktopLyricLockedKey
 import com.jussicodes.music.constants.ignoredUpdateVersionKey
 import com.jussicodes.music.constants.audioSourceKey
 import com.jussicodes.music.constants.directSourceKey
@@ -101,6 +103,7 @@ import com.jussicodes.music.constants.themeColorSourceKey
 import com.jussicodes.music.constants.unblockSourceKey
 import com.jussicodes.music.constants.updateLastErrorKey
 import com.jussicodes.music.lyric.DesktopLyricManager
+import com.jussicodes.music.lyric.DesktopLyricDefaultFontSizeSp
 import com.jussicodes.music.ui.components.ScaledDialogContent
 import com.jussicodes.music.ui.components.Dialog
 import com.jussicodes.music.ui.components.SongQualityDialog
@@ -138,6 +141,7 @@ import com.jussicodes.music.utils.UpdateInfo
 import com.jussicodes.music.utils.UpdateSourceStatus
 import com.jussicodes.music.utils.apiServers
 import com.jussicodes.music.utils.downloadSources
+import com.jussicodes.music.utils.normalizedSourceId
 import com.jussicodes.music.utils.rememberEnumPreference
 import com.jussicodes.music.utils.rememberPreference
 import com.rcmiku.ncmapi.api.account.AccountApi
@@ -166,6 +170,8 @@ fun SettingsScreen(navController: NavHostController) {
     val dynamicColorAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
 
     var desktopLyricEnabled by rememberPreference(desktopLyricEnabledKey, false)
+    var desktopLyricFontSize by rememberPreference(desktopLyricFontSizeKey, DesktopLyricDefaultFontSizeSp)
+    var desktopLyricLocked by rememberPreference(desktopLyricLockedKey, false)
     var audioQuality by rememberEnumPreference(audioQualityKey, defaultValue = SongLevel.STANDARD)
     var themeColorSource by rememberEnumPreference(
         themeColorSourceKey,
@@ -340,6 +346,8 @@ fun SettingsScreen(navController: NavHostController) {
         }
     }
 
+
+
     // 切换音源后重解析当前播放的歌：清掉 ResolvingDataSource 的解析缓存（cacheKey
     // 只含音质，不含音源），重新 prepare 当前 MediaItem 让它走一遍新的解析链。
     fun reloadCurrentSong() {
@@ -374,7 +382,6 @@ fun SettingsScreen(navController: NavHostController) {
     var overlayPermissionGranted by remember {
         mutableStateOf(DesktopLyricManager.canDrawOverlays(context))
     }
-    var pendingOverlayGrant by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var accountAvatar by rememberSaveable { mutableStateOf("") }
     var accountNickname by rememberSaveable { mutableStateOf("") }
@@ -383,17 +390,8 @@ fun SettingsScreen(navController: NavHostController) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 overlayPermissionGranted = DesktopLyricManager.canDrawOverlays(context)
-                // 从系统悬浮窗授权页返回且已授权 → 自动开启桌面歌词
-                if (pendingOverlayGrant && overlayPermissionGranted) {
-                    pendingOverlayGrant = false
-                    coroutineScope.launch {
-                        DesktopLyricManager.setEnabled(
-                            context = context,
-                            enabled = true,
-                            requestPermissionIfNeeded = false,
-                        )
-                    }
-                }
+                // 授权页回来后按已保存的开关状态恢复；权限没变时这是空操作。
+                DesktopLyricManager.syncService(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -481,21 +479,6 @@ fun SettingsScreen(navController: NavHostController) {
 
     // 桌面歌词有效开关 = 存储开启 && 悬浮窗权限已授予
     val lyricOn = desktopLyricEnabled && overlayPermissionGranted
-    fun setLyricTarget(on: Boolean) {
-        if (on && !overlayPermissionGranted) {
-            // 未授权：记录意图并直接跳系统授权页，返回后自动开启
-            pendingOverlayGrant = true
-            DesktopLyricManager.requestOverlayPermission(context)
-        } else {
-            coroutineScope.launch {
-                DesktopLyricManager.setEnabled(
-                    context = context,
-                    enabled = on,
-                    requestPermissionIfNeeded = false,
-                )
-            }
-        }
-    }
 
     val appearanceTitle = "外观"
     val appearanceSubtitle = when (themeColorSource) {
@@ -579,16 +562,31 @@ fun SettingsScreen(navController: NavHostController) {
             ),
             SettingItemData(
                 title = "桌面歌词",
-                subtitle = if (lyricOn) "已开启" else "需要悬浮窗权限",
+                subtitle = (if (lyricOn) {
+                    "已开启 · ${desktopLyricFontSize.toInt()}sp" +
+                        if (desktopLyricLocked) " · 已锁定" else ""
+                } else if (desktopLyricEnabled) {
+                    "已开启但缺少悬浮窗权限"
+                } else {
+                    "已关闭"
+                }) + " · 点击进入设置",
                 imageVector = DesktopLyrics,
                 trailingContent = {
                     Switch(
                         checked = lyricOn,
-                        onCheckedChange = { setLyricTarget(it) }
+                        onCheckedChange = { on ->
+                            coroutineScope.launch {
+                                DesktopLyricManager.setEnabled(
+                                    context = context,
+                                    enabled = on,
+                                    requestPermissionIfNeeded = on
+                                )
+                            }
+                        }
                     )
                     Spacer(Modifier.width(12.dp))
                 },
-                onClick = { setLyricTarget(!lyricOn) }
+                onClick = { navController.navigate(Screen.DesktopLyricSettings.route) }
             ),
             SettingItemData(
                 title = "主页专辑墙",
@@ -824,6 +822,7 @@ fun SettingsScreen(navController: NavHostController) {
         }
     }
 
+
     if (showQualityDialog) {
         SongQualityDialog(
             currentLevel = audioQuality,
@@ -971,7 +970,7 @@ fun SettingsScreen(navController: NavHostController) {
 
     if (showGithubSourceDialog) {
         GitHubDownloadSourceDialog(
-            currentSourceId = githubDownloadSource,
+            currentSourceId = normalizedSourceId(githubDownloadSource),
             statuses = githubSourceStatuses,
             testing = testingGithubSources,
             onDismiss = { showGithubSourceDialog = false },
@@ -1009,7 +1008,7 @@ fun SettingsScreen(navController: NavHostController) {
             isDownloading = downloadingUpdate,
             downloadProgress = if (downloadingUpdate) updateDownloadProgress else null,
             progressText = updateDownloadText,
-            selectedSourceId = githubDownloadSource,
+            selectedSourceId = normalizedSourceId(githubDownloadSource),
             sourceStatuses = githubSourceStatuses,
             isMeasuringSources = isMeasuringUpdateSources,
             onMeasureSources = {
@@ -1043,7 +1042,7 @@ fun SettingsScreen(navController: NavHostController) {
                 UpdateDownloadService.start(
                     context.applicationContext,
                     updateInfo,
-                    githubDownloadSource
+                    normalizedSourceId(githubDownloadSource)
                 )
             },
             onCancelDownload = {

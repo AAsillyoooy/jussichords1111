@@ -9,7 +9,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import kotlinx.serialization.json.JsonArray
@@ -57,18 +56,21 @@ object LxPluginManager {
     private const val BUILTIN_ASSET = "lx/lx-builtin.js"
 
     private suspend fun ensureBuiltinScript(context: Context) {
-        if (LxPluginStore.latest.value.any { it.id == BUILTIN_ID }) return
+        // 注意：这里必须用 snapshot()（等磁盘读完）判断，不能用 latest.value 空镜像，
+        // 否则启动瞬间读到空列表 → 把整份脚本列表覆盖成只剩内置脚本（用户脚本全丢）。
+        if (LxPluginStore.snapshot().any { it.id == BUILTIN_ID }) return
         val script = runCatching {
             context.assets.open(BUILTIN_ASSET).bufferedReader().use { it.readText() }
         }.getOrNull() ?: return
-        LxPluginStore.save(
-            LxPluginStore.latest.value + LxPluginItem(
+        LxPluginStore.update { list ->
+            if (list.any { it.id == BUILTIN_ID }) list
+            else list + LxPluginItem(
                 id = BUILTIN_ID,
                 name = "玉宁熙 Pro（内置）",
                 rawScript = script,
                 isEnabled = true
             )
-        )
+        }
     }
 
     val plugins: Flow<List<LxPluginItem>> get() = LxPluginStore.latest
@@ -91,49 +93,72 @@ object LxPluginManager {
         )
         val sources = runCatching { engine?.verify(candidate).orEmpty() }.getOrDefault(emptyList())
         val item = candidate.copy(sources = sources)
-        val existing = LxPluginStore.latest.first().firstOrNull { it.name == item.name }
-        return if (existing != null) {
-            ImportResult.Duplicate(existing, item)
-        } else {
-            LxPluginStore.latest.first() + item
-            ImportResult.Success(item)
-        }
+        val existing = LxPluginStore.snapshot().firstOrNull { it.name == item.name }
+        return if (existing != null) ImportResult.Duplicate(existing, item) else ImportResult.Success(item)
     }
 
     /** 确认导入：overwriteId 非空表示覆盖同名旧脚本。 */
     suspend fun confirmImport(newItem: LxPluginItem, overwriteId: String?) {
-        val list = LxPluginStore.latest.first().toMutableList()
         val item = newItem.copy(id = overwriteId ?: newItem.id)
-        val idx = list.indexOfFirst { it.id == item.id }
-        if (idx >= 0) list[idx] = item else list.add(item)
-        LxPluginStore.save(list)
+        // update{} 会等落盘完成再返回：导入后立刻杀进程也不会丢脚本。
+        LxPluginStore.update { list ->
+            val next = list.toMutableList()
+            val idx = next.indexOfFirst { it.id == item.id }
+            if (idx >= 0) next[idx] = item else next.add(item)
+            next
+        }
+        // 体检（importScript → verify）是按新条目自己的 UUID 建的临时沙盒；
+        // 覆盖同名旧脚本时它没有对应条目，一并销毁，避免 WebView 泄漏。
+        if (newItem.id != item.id) engine?.deactivate(newItem.id)
         engine?.deactivate(item.id)
     }
 
     suspend fun remove(id: String) {
         engine?.deactivate(id)
-        LxPluginStore.save(LxPluginStore.latest.first().filterNot { it.id == id })
+        LxPluginStore.update { list -> list.filterNot { it.id == id } }
     }
 
     suspend fun toggle(id: String, enabled: Boolean) {
-        LxPluginStore.save(
-            LxPluginStore.latest.first().map { if (it.id == id) it.copy(isEnabled = enabled) else it }
-        )
+        LxPluginStore.update { list ->
+            list.map { if (it.id == id) it.copy(isEnabled = enabled) else it }
+        }
         if (!enabled) engine?.deactivate(id)
     }
 
-    suspend fun setPriority(id: String, newIndex: Int) {
-        val list = LxPluginStore.latest.first().toMutableList()
-        val idx = list.indexOfFirst { it.id == id }
-        if (idx < 0) return
-        val item = list.removeAt(idx)
-        list.add(newIndex.coerceIn(0, list.size), item)
-        LxPluginStore.save(list)
+    /**
+     * 拖拽排序落盘：按传入的 id 顺序重排，未出现在 ids 里的条目保持原有相对顺序跟在后面。
+     * 解析顺序就是列表顺序（见 [resolveUrl]），所以这里一次写完即可。
+     */
+    suspend fun reorder(ids: List<String>) {
+        if (ids.isEmpty()) return
+        LxPluginStore.update { list ->
+            val byId = list.associateBy { it.id }
+            val ordered = ids.mapNotNull { byId[it] }
+            // 没排到的条目（理论上不该有）原序接在后面，绝不丢条目。
+            ordered + list.filterNot { it.id in ids }
+        }
+    }
+
+    /** 批量启用/停用；停用后顺手销毁对应沙盒。 */
+    suspend fun setEnabled(ids: Collection<String>, enabled: Boolean) {
+        if (ids.isEmpty()) return
+        LxPluginStore.update { list ->
+            list.map { if (it.id in ids) it.copy(isEnabled = enabled) else it }
+        }
+        if (!enabled) ids.forEach { engine?.deactivate(it) }
+    }
+
+    /** 批量删除；内置脚本不参与删除。 */
+    suspend fun removeAll(ids: Collection<String>) {
+        val targets = ids.filter { it != BUILTIN_ID }
+        if (targets.isEmpty()) return
+        targets.forEach { engine?.deactivate(it) }
+        LxPluginStore.update { list -> list.filterNot { it.id in targets } }
     }
 
     /** 预热：把已启用的插件脚本装进沙盒池（不命中时首播不再等建沙盒）。 */
     suspend fun warmUp() {
-        val enabled = LxPluginStore.latest.first().filter { it.isEnabled }.take(MAX_WARM_PLUGINS)
+        val enabled = LxPluginStore.snapshot().filter { it.isEnabled }.take(MAX_WARM_PLUGINS)
         for (item in enabled) {
             runCatching { engine?.warmUp(item.id) }
         }
@@ -149,6 +174,27 @@ object LxPluginManager {
         }.getOrNull()?.takeIf { it.isNotBlank() }
     }
 
+    /**
+     * 在线音源安装：下载 → 校验 → 入库。同名脚本按「更新」处理（覆盖旧条目），
+     * 不再弹重名确认框（列表里点的就是那一项）。
+     * @return 安装成功的脚本名；失败返回 null
+     */
+    suspend fun installOnlineSource(source: OnlineSource): String? {
+        val script = LxOnlineSources.download(source) ?: return null
+        val name = source.name.ifBlank { source.slug }
+        return when (val r = importScript(name, script)) {
+            is ImportResult.Success -> {
+                confirmImport(r.item, null)
+                r.item.name
+            }
+            is ImportResult.Duplicate -> {
+                confirmImport(r.newItem, r.existing.id)
+                r.newItem.name
+            }
+            is ImportResult.Failure -> null
+        }
+    }
+
     // ---- 解析 ----
 
     /**
@@ -156,7 +202,7 @@ object LxPluginManager {
      * @param songLevel NCM 音质档位 value（standard/…/jymaster）
      */
     suspend fun resolveUrl(songId: String, songLevel: String): String? {
-        val enabled = LxPluginStore.latest.first().filter { it.isEnabled }
+        val enabled = LxPluginStore.snapshot().filter { it.isEnabled }
         if (enabled.isEmpty()) return null
         val song = fetchSong(songId) ?: return null
         val musicInfo = buildMusicInfo(songId, song)

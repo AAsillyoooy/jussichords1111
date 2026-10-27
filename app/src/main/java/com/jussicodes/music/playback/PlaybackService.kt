@@ -127,9 +127,14 @@ class PlaybackService : MediaSessionService() {
                 Player.STATE_ENDED -> playbackHistorySession
                     .finish(SystemClock.elapsedRealtime(), "playend")
                     ?.let { reportDuration(it) }
-                Player.STATE_IDLE -> playbackHistorySession
-                    .finish(SystemClock.elapsedRealtime())
-                    ?.let { reportDuration(it) }
+                Player.STATE_IDLE ->
+                    // 换源重放会主动 stop()（打回 IDLE）再 prepare，这一次 IDLE 不是「播完/中断」，
+                    // 不结算也不上报，否则每首被换源的歌都会多出一条假的中断续播记录。
+                    if (!retryingSource) {
+                        playbackHistorySession
+                            .finish(SystemClock.elapsedRealtime())
+                            ?.let { reportDuration(it) }
+                    }
             }
         }
 
@@ -277,11 +282,17 @@ class PlaybackService : MediaSessionService() {
     /** 重新 prepare 时回退一点，避免卡在同一个读位置反复失败。 */
     private val rewindOnRetryMs = 2_000L
 
-    /** 解析播放地址（一次网络请求）的超时。 */
-    private val resolveUrlTimeoutMs = 15_000L
+    /** 解析播放地址（一次网络请求 + 可能的试听重解析）的超时。 */
+    private val resolveUrlTimeoutMs = 20_000L
 
     private val recoveryListener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            // 音源本身坏了（404 / HTML 页 / 不是音频）：同一条链重试没意义 → 换源。
+            // 这条要先判，不能被下面的网络错误分支拦走。
+            if (isBadSourceError(error)) {
+                onBadSourceError()
+                return
+            }
             if (!isRetryableNetworkError(error)) return
             val player = mediaSession?.player ?: return
             val item = player.currentMediaItem ?: return
@@ -321,7 +332,47 @@ class PlaybackService : MediaSessionService() {
             errorMediaId = null
             pausedByNetworkError = false
             recoveryJob?.cancel()
+            // 时长校验状态跟着曲目走：换歌就清掉上一首的「已校验直链」和重试计数，
+            // 已拉黑的坏链保留（坏源不会自愈，新一次播放直接跳过它）。
+            verifiedUrl = null
+            mediaItem?.mediaId?.takeIf { it.isNotBlank() }?.let(ResolveGuard::resetRetries)
         }
+    }
+
+    /**
+     * 音源坏了（非网络原因）：拉黑这条直链，换下一个源重放；
+     * 已经没有更好的源了，就按「自动跳过错误歌曲」设置处理，别再退避重试同一条链。
+     */
+    private fun onBadSourceError() {
+        val player = mediaSession?.player ?: return
+        val item = player.currentMediaItem ?: return
+        val songId = item.mediaId.takeIf { it.isNotBlank() } ?: return
+        val observation = ResolveGuard.observe(songId) ?: run {
+            // 没有解析记录（本地文件等）：交回原有错误处理。
+            giveUpOnNetworkError()
+            return
+        }
+        verifiedUrl = null
+        if (observation.trial || observation.alreadyRejected ||
+            !ResolveGuard.rejectAndShouldRetry(observation)
+        ) {
+            android.util.Log.w(
+                TAG,
+                "bad source with no more candidates songId=$songId retry=${observation.retries}"
+            )
+            if (ResolveGuard.shouldWarn(observation)) {
+                Toast.makeText(this, "这首暂无可用的完整音源", Toast.LENGTH_LONG).show()
+            }
+            if (dataStore.get(autoSkipNextOnErrorKey, false) && player.hasNextMediaItem()) {
+                player.stop()
+                player.seekToNext()
+                player.prepare()
+                player.play()
+            }
+            return
+        }
+        android.util.Log.w(TAG, "bad source, switching source songId=$songId url=${observation.url.take(100)}")
+        retryWithNextSource(songId)
     }
 
     /** 重试耗尽：停在当前曲提示；若用户开了「自动跳过错误歌曲」才跳下一首。 */
@@ -339,6 +390,127 @@ class PlaybackService : MediaSessionService() {
             "网络异常，播放已暂停，点播放键可重试",
             Toast.LENGTH_LONG
         ).show()
+    }
+
+    /** 当前曲目已经校验过时长的直链，避免同一根链反复触发校验。 */
+    private var verifiedUrl: String? = null
+
+    /**
+     * 正在「拉黑坏源并重放」的过程中。
+     *
+     * 重放必须走 stop()（见 [retryWithNextSource]），而 stop() 会让播放状态回到 IDLE，
+     * 播放历史上报会把这次打断当成一次「播完/中断」结算并上报。这个标志让上报层跳过它。
+     */
+    @Volatile
+    private var retryingSource = false
+
+    /** 时长校验允许的误差：至少 5s，长歌按 2% 放宽。 */
+    private fun durationToleranceMs(expectedMs: Long): Long =
+        maxOf(5_000L, expectedMs / 50)
+
+    /**
+     * 时长校验：解析出来的直链未必是这首歌的完整音频。
+     *
+     * 典型坏源：别的歌、被截断/拼接的文件、时长被裁过的转码。它们都能「解析成功」并正常开始播放，
+     * 用户看到的现象是「放一半没声 / 放到下一首之前就断了」，只能手动切歌再切回来。
+     * 所以这里等真实音频就绪后核对 ExoPlayer 读到的时长与歌曲元数据时长，超出容差就把这条链
+     * 拉黑（[ResolveGuard]）并换源重放——重试会跳过坏链、升级到下一个脚本/直连源。
+     *
+     * 试听片段（30s 占位）不在这里重试：能走到「拿到试听」说明所有脚本/直连源都已试过，
+     * 再解析一遍结果只会一样，反而把每首无源歌的加载时间翻几倍。
+     */
+    private val durationVerifyListener = object : Player.Listener {
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (playbackState != Player.STATE_READY) return
+            val player = mediaSession?.player ?: return
+            val item = player.currentMediaItem ?: return
+            val songId = item.mediaId.takeIf { it.isNotBlank() } ?: return
+            val expectedMs = item.mediaMetadata.extras
+                ?.getLong(MediaSessionConstants.EXTRA_DURATION_MS, 0L) ?: 0L
+            if (expectedMs <= 0) return
+            // 只有「由我们解析出来的」曲目才有记录；本地文件 / 直接给的 http 地址没有，直接跳过。
+            val observation = ResolveGuard.observe(songId) ?: return
+            if (verifiedUrl == observation.url) return
+            verifiedUrl = observation.url
+
+            scope.launch {
+                val p = mediaSession?.player ?: return@launch
+                // 时长要读「稳定后」的值：边下边播的 MP3（VBR / 无 Xing 头）一开始给的是按码率估算的
+                // 近似值，播了几秒才收敛；拿 STATE_READY 那一瞬间的值去比会误判成坏源。
+                delay(300)
+                if (p.currentMediaItem?.mediaId != songId) return@launch
+                val early = p.duration
+                // 等到「播了几秒」或「时长有值」，上限 9s；两个条件都要计入上限，
+                // 否则 duration 一直为 0 时会退化成死循环（主线程上就是 ANR）。
+                var waited = 0L
+                while (waited < MEDIA_STATE_SETTLE_MS) {
+                    if (p.currentMediaItem?.mediaId != songId) return@launch
+                    if (p.duration > 0 && p.currentPosition >= DURATION_SAMPLE_AFTER_MS) break
+                    delay(500)
+                    waited += 500
+                }
+                if (early > 0 && p.duration > 0 && kotlin.math.abs(p.duration - early) > 500) {
+                    // 估算还在收敛：再给 2.5s
+                    repeat(5) { delay(500) }
+                }
+                val actualMs = p.duration
+                if (actualMs == androidx.media3.common.C.TIME_UNSET || actualMs <= 0) return@launch
+                if (p.currentMediaItem?.mediaId != songId) return@launch
+                val diff = kotlin.math.abs(actualMs - expectedMs)
+                if (diff <= durationToleranceMs(expectedMs)) return@launch
+
+                android.util.Log.w(
+                    TAG,
+                    "duration mismatch songId=$songId expected=${expectedMs}ms actual=${actualMs}ms " +
+                        "diff=${diff}ms retry=${observation.retries} trial=${observation.trial} " +
+                        "url=${observation.url.take(100)}"
+                )
+                // 试听片段：所有源都试过了，重试没有意义，保持「能听 30 秒」的现状。
+                if (observation.trial) return@launch
+                // 这次交出去的直链本身就在拉黑集合里（候选已试穿）→ 别再重放，直接接受并提示一次。
+                if (observation.alreadyRejected || !ResolveGuard.rejectAndShouldRetry(observation)) {
+                    if (ResolveGuard.shouldWarn(observation)) {
+                        Toast.makeText(
+                            this@PlaybackService,
+                            "这首音源与歌曲时长不符，已尝试其它音源仍失败",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@launch
+                }
+                retryWithNextSource(songId)
+            }
+        }
+    }
+
+    /**
+     * 换源重放当前曲目。
+     *
+     * **必须 stop() 而不是 prepare()**：ExoPlayerImpl.prepare() 在非 IDLE 状态下直接 return
+     * （1.4.1 源码：`if (playbackInfo.playbackState != Player.STATE_IDLE) return;`），
+     * 所以 READY 状态下 pause → seekTo(0) → prepare() 什么都不会发生，ResolvingDataSource
+     * 不会重新解析 —— 那样「换源重试」只是把同一根坏链再放一遍。
+     * stop() 会把播放器打回 IDLE 并释放 MediaSourceList，随后的 prepare() 才会重新创建
+     * MediaSource、重新走一遍 uri 解析（带上拉黑集合）。
+     */
+    private fun retryWithNextSource(songId: String) {
+        val player = mediaSession?.player ?: return
+        if (player.currentMediaItem?.mediaId != songId) return
+        retryingSource = true
+        verifiedUrl = null
+        scope.launch {
+            try {
+                player.stop()
+                player.seekTo(0)
+                player.prepare()
+                player.play()
+            } finally {
+                // prepare() 是异步的；给内部播发线程一点时间再过掉「正在重放」标志，
+                // 让 stop() 引起的 IDLE 事件不会结算播放历史上报。
+                delay(1_500)
+                retryingSource = false
+            }
+        }
     }
 
     /** 监听网络恢复：之前因弱网停住的，走到这续播。 */
@@ -376,13 +548,71 @@ class PlaybackService : MediaSessionService() {
         reloadJob = scope.launch {
             PlaybackReloadBus.requests.collect {
                 val player = mediaSession?.player ?: return@collect
-                if (player.currentMediaItem == null) return@collect
-                // 重播同一 MediaItem：pause → seek 0 → prepare，走一遍新的 ResolvingDataSource
-                player.pause()
-                player.seekTo(0)
+                val item = player.currentMediaItem ?: return@collect
+                // 用户主动换了音源：清掉这首歌上一轮（旧音源）的拉黑集合与重试计数，
+                // 否则新音源会被旧源的坏链记录连坐跳过。
+                item.mediaId.takeIf { it.isNotBlank() }?.let(ResolveGuard::forgetSong)
+                verifiedUrl = null
+                // 必须 stop() → prepare()：prepare() 在非 IDLE 状态直接 return，
+                // pause + seekTo(0) + prepare() 不会重新解析，等于没换源。
+                val pos = player.currentPosition
+                android.util.Log.i(
+                    "JussiAudio",
+                    "🔄 [音质/音源切换] 收到重载请求，保留播放进度 ${pos}ms，正在原地重新解析续播: ${item.mediaMetadata.title}"
+                )
+                player.stop()
+                if (pos > 0) {
+                    player.seekTo(pos)
+                }
                 player.prepare()
                 player.play()
             }
+        }
+    }
+
+    /** 音质检测与切换测试日志监听器：直观打印歌曲信息、真实物理解码格式、码率与偏好。 */
+    private val audioQualityLogListener = object : Player.Listener {
+        override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+            val player = mediaSession?.player ?: return
+            val item = player.currentMediaItem ?: return
+            val title = item.mediaMetadata.title ?: "未知歌曲"
+            val artist = item.mediaMetadata.artist ?: "未知歌手"
+            val mediaId = item.mediaId
+
+            var formatSummary = "未知格式"
+            var mimeType = "未知"
+            var bitrateKbps = -1
+            var sampleRate = -1
+            var channels = -1
+
+            for (group in tracks.groups) {
+                if (group.type != androidx.media3.common.C.TRACK_TYPE_AUDIO) continue
+                for (i in 0 until group.length) {
+                    if (group.isTrackSelected(i)) {
+                        val format = group.getTrackFormat(i)
+                        mimeType = format.sampleMimeType ?: "未知"
+                        bitrateKbps = if (format.bitrate > 0) format.bitrate / 1000 else -1
+                        sampleRate = format.sampleRate
+                        channels = format.channelCount
+                        val isFlac = mimeType.contains("flac", ignoreCase = true)
+                        val isHighRes = isFlac && (sampleRate >= 48000 || format.pcmEncoding == androidx.media3.common.C.ENCODING_PCM_24BIT || format.pcmEncoding == androidx.media3.common.C.ENCODING_PCM_32BIT)
+                        formatSummary = when {
+                            isHighRes -> "Hi-Res 高解析无损 [24bit/${sampleRate}Hz]"
+                            isFlac -> "无损 [16bit/${sampleRate}Hz]"
+                            bitrateKbps >= 250 -> "极高 [${bitrateKbps}kbps]"
+                            bitrateKbps in 150..249 -> "较高 [${bitrateKbps}kbps]"
+                            bitrateKbps > 0 -> "标准 [${bitrateKbps}kbps]"
+                            else -> mimeType
+                        }
+                        break
+                    }
+                }
+            }
+
+            android.util.Log.i(
+                "JussiAudio",
+                "🎵 [音质生效] 歌曲: $title - $artist (id: $mediaId) | 实际解码: $formatSummary (MIME: $mimeType, 采样率: ${sampleRate}Hz, 声道: $channels, 码率: ${bitrateKbps}kbps)"
+            )
         }
     }
 
@@ -512,6 +742,9 @@ class PlaybackService : MediaSessionService() {
         player.addListener(playbackHistoryListener)
         // 弱网恢复：同曲退避重试 + 网络恢复后续播
         player.addListener(recoveryListener)
+        // 音源时长校验：解析出的直链与歌曲元数据时长不符 → 拉黑该链并换源重试
+        player.addListener(durationVerifyListener)
+        player.addListener(audioQualityLogListener)
         observeNetworkRecovery()
         observeSourceReloads()
         // 一起听会话：挂到全局播放器上，冷启动恢复/创建房间时接管同步。
@@ -728,5 +961,15 @@ class PlaybackService : MediaSessionService() {
             }
             return super.onCustomCommand(session, controller, customCommand, args)
         }
+    }
+
+    companion object {
+        private const val TAG = "PlaybackService"
+
+        /** 时长校验：等播放器时长读数稳定的上限（毫秒）。 */
+        private const val MEDIA_STATE_SETTLE_MS = 9_000L
+
+        /** 时长校验：至少播到这么久再采样，避开 VBR 粗估。 */
+        private const val DURATION_SAMPLE_AFTER_MS = 4_000L
     }
 }

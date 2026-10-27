@@ -33,10 +33,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -56,7 +57,12 @@ import com.jussicodes.music.constants.audioEffectIntensityKey
 import com.jussicodes.music.constants.audioEffectModeKey
 import com.jussicodes.music.constants.audioEffectReverbEnabledKey
 import com.jussicodes.music.constants.audioEffectSpeedKey
+import com.jussicodes.music.constants.audioQualityKey
+import com.jussicodes.music.playback.PlaybackReloadBus
 import com.jussicodes.music.playback.audio.AudioEffectMode
+import com.rcmiku.ncmapi.api.player.SongLevel
+import com.jussicodes.music.ui.icons.MusicNote
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.outlined.Dns
 import com.jussicodes.music.ui.icons.GraphicEq
 import com.jussicodes.music.ui.icons.Headphones
@@ -88,6 +94,7 @@ fun PlayerMenuBottomSheet(
     landscape: Boolean = false,
 ) {
     val bottomSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val coroutineScope = rememberCoroutineScope()
     var timePicker by rememberSaveable { mutableStateOf(false) }
     val playerState = LocalPlayerState.current
     val mediaController = LocalPlayerController.current.controller
@@ -171,6 +178,9 @@ fun PlayerMenuBottomSheet(
     // the whole app until the user changes it again).
     var audioSource by rememberPreference(audioSourceKey, AudioSources.DEFAULT)
     var directSource by rememberPreference(directSourceKey, LocalSources.AUTO)
+    var audioQuality by rememberEnumPreference(audioQualityKey, defaultValue = SongLevel.STANDARD)
+    var showQualityDialog by rememberSaveable { mutableStateOf(false) }
+    val qualitySpec = resolveAudioQualitySpec(playerState?.tracks, audioQuality)
     var showSourcePicker by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(directSource) {
         com.rcmiku.ncmapi.api.player.PlayerApi.DirectSourceSettings.SOURCE = directSource
@@ -250,7 +260,9 @@ fun PlayerMenuBottomSheet(
                             onSourceClick = {
                                 showSourcePicker = true
                                 onDismiss()
-                            }
+                            },
+                            qualityLabel = qualitySpec.label,
+                            onQualityClick = { showQualityDialog = true }
                         )
                     }
                     Column(
@@ -316,7 +328,9 @@ fun PlayerMenuBottomSheet(
                                 onSourceClick = {
                                     showSourcePicker = true
                                     onDismiss()
-                                }
+                                },
+                                qualityLabel = qualitySpec.label,
+                                onQualityClick = { showQualityDialog = true }
                             )
                         }
                     }
@@ -436,6 +450,20 @@ fun PlayerMenuBottomSheet(
         )
     }
 
+    if (showQualityDialog) {
+        SongQualityDialog(
+            currentLevel = audioQuality,
+            onDismiss = { showQualityDialog = false },
+            onQualitySelected = { selectedLevel ->
+                audioQuality = selectedLevel
+                coroutineScope.launch {
+                    kotlinx.coroutines.delay(100)
+                    PlaybackReloadBus.requestReload()
+                }
+            }
+        )
+    }
+
     ListenTogetherSheet(
         openBottomSheet = openListenTogetherSheet,
         onDismiss = { setListenTogetherOpen(false) }
@@ -487,7 +515,7 @@ private fun PlaybackMenuSection(
     }
 }
 
-/** 「音频」分组：音效 / 切换音源。 */
+/** 「音频」分组：音质 / 音效 / 切换音源。 */
 @Composable
 private fun AudioMenuSection(
     audioEffectModeText: String,
@@ -495,8 +523,18 @@ private fun AudioMenuSection(
     onAudioEffectClick: () -> Unit,
     sourceLabel: String,
     onSourceClick: () -> Unit,
+    qualityLabel: String,
+    onQualityClick: () -> Unit,
 ) {
     MenuGroupContainer {
+        MenuRow(
+            icon = MusicNote,
+            title = "音质",
+            value = qualityLabel,
+            iconAlpha = 1f,
+            onClick = onQualityClick
+        )
+        MenuDivider()
         MenuRow(
             icon = GraphicEq,
             title = "音效",

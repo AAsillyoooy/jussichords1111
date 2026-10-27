@@ -23,12 +23,17 @@ object AudioSources {
     /** 新装/升级后的默认选择（用户明确要求：新版本一律回到内置 LX 脚本）。 */
     const val DEFAULT = LX
 
-    data class Option(val value: String, val label: String, val description: String = "")
+    data class Option(
+        val value: String,
+        val label: String,
+        val description: String = "",
+        val maxQuality: String = ""
+    )
 
     val OPTIONS = listOf(
-        Option(LX, "LX音源", "运行 JS 脚本解析"),
-        Option(DIRECT, "直连音源", "请求内置解析接口"),
-        Option(PROXY, "API代理服务器", "由自建服务器代解"),
+        Option(LX, "LX音源", "运行 JS 脚本解析", "最高 Hi-Res"),
+        Option(DIRECT, "直连音源", "请求内置解析接口", "最高 Hi-Res"),
+        Option(PROXY, "API代理服务器", "由自建服务器代解", "最高 无损 / 极高"),
     )
 
     fun fromKey(key: String): Option? = OPTIONS.find { it.value == key }
@@ -38,4 +43,7 @@ object AudioSources {
 object AudioSourceSettings {
     /** 当前选择的音源（AudioSources 三选一之一）。 */
     var SELECTED: String = AudioSources.DEFAULT
+
+    /** 是否对所有歌曲都走音源解析（开启时非 VIP 歌也走第三方音源，默认 false）。 */
+    var RESOLVE_ALL: Boolean = false
 }

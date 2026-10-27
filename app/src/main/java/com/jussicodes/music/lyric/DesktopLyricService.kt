@@ -86,7 +86,6 @@ class DesktopLyricService : Service() {
     private var panelView: LinearLayout? = null
     private var playPauseButton: ImageButton? = null
     private var translationButton: ImageButton? = null
-    private var translationStateView: TextView? = null
 
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var controller: MediaController? = null
@@ -113,6 +112,8 @@ class DesktopLyricService : Service() {
     private val controlBackgroundColor = Color.parseColor("#E62B2B2F")
     private val outlineColor = adjustAlpha(Color.WHITE, 0.1f)
     private val buttonTintColor = Color.parseColor("#F2FFFFFF")
+    /** 翻译开启（实心按钮）时图标的挖空色，贴近控制条底色。 */
+    private val translationActiveGlyphColor = Color.parseColor("#2A2A2E")
     private val buttonBackgroundColor = adjustAlpha(Color.WHITE, 0.08f)
 
     private val playerListener = object : Player.Listener {
@@ -173,7 +174,7 @@ class DesktopLyricService : Service() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // 旋转/分屏/折叠屏：可用区域变了，按比例重新落位，避免跑到屏幕外。
+        // 旋转/分屏/折叠屏：可用区域变了，按比例重新落位（位置比例本身允许落在屏幕外）。
         contentWidthPx = measureContentWidth()
         relayout()
         positionControlWindow()
@@ -475,8 +476,9 @@ class DesktopLyricService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = clampX(xFromFraction(width), width)
-            y = clampY(yFromFraction(height), height)
+            // 不做屏幕内夹紧：歌词窗允许拖到屏幕边缘以外。
+            x = xFromFraction(width)
+            y = yFromFraction(height)
         }
 
         lyricRoot = root
@@ -556,11 +558,16 @@ class DesktopLyricService : Service() {
         val width = computeLyricWidth()
         val height = computeLyricHeight()
         if (params.width == width && params.height == height) return
+        // 以窗口中心为锚点。整窗宽度是按「本首歌最长行」算的，换歌会变宽/变窄；
+        // 只保住左上角的话，窗口内部居中的文字会整体左移右移（用户说的「切歌左移错位」）。
+        val centerX = params.x + params.width / 2
+        val centerY = params.y + params.height / 2
         params.width = width
         params.height = height
-        params.x = clampX(params.x, width)
-        params.y = clampY(params.y, height)
+        params.x = centerX - width / 2
+        params.y = centerY - height / 2
         runCatching { windowManager.updateViewLayout(root, params) }
+        persistPosition()
         positionControlWindow()
     }
 
@@ -600,27 +607,26 @@ class DesktopLyricService : Service() {
 
     private fun xFromFraction(width: Int): Int {
         val area = screenArea()
-        val free = (area.right - area.left - width).coerceAtLeast(0)
-        return area.left + (free * xFraction.coerceIn(0f, 1f)).toInt()
+        val areaWidth = area.right - area.left
+        // 中心锚点：fraction 记录的是中心在屏幕可用宽度里的比例，还原后减半宽得到左边缘。
+        return (area.left + areaWidth * xFraction - width / 2f).toInt()
     }
 
     private fun yFromFraction(height: Int): Int {
         val area = screenArea()
-        val free = (area.bottom - area.top - height).coerceAtLeast(0)
-        return area.top + (free * yFraction.coerceIn(0f, 1f)).toInt()
+        val areaHeight = area.bottom - area.top
+        // 中心锚点：fraction 记录的是中心在屏幕可用高度里的比例，还原后减半高得到顶边缘。
+        return (area.top + areaHeight * yFraction - height / 2f).toInt()
     }
 
     private fun persistPosition() {
         val params = lyricParams ?: return
         val area = screenArea()
-        val freeX = (area.right - area.left - params.width).coerceAtLeast(0)
-        val freeY = (area.bottom - area.top - params.height).coerceAtLeast(0)
-        xFraction = if (freeX <= 0) 0f else {
-            ((params.x - area.left).toFloat() / freeX).coerceIn(0f, 1f)
-        }
-        yFraction = if (freeY <= 0) 0f else {
-            ((params.y - area.top).toFloat() / freeY).coerceIn(0f, 1f)
-        }
+        val areaWidth = area.right - area.left
+        val areaHeight = area.bottom - area.top
+        // 中心锚点：记录窗口中心在屏幕可用区域里的比例，宽度变化时中心不漂移。
+        xFraction = if (areaWidth <= 0) 0.5f else (params.x + params.width / 2f - area.left) / areaWidth
+        yFraction = if (areaHeight <= 0) 0.5f else (params.y + params.height / 2f - area.top) / areaHeight
         serviceScope.launch {
             applicationContext.dataStore.edit { prefs ->
                 prefs[desktopLyricXFractionKey] = xFraction
@@ -633,8 +639,8 @@ class DesktopLyricService : Service() {
         xFraction = DesktopLyricDefaultXFraction
         yFraction = DesktopLyricDefaultYFraction
         val params = lyricParams ?: return
-        params.x = clampX(xFromFraction(params.width), params.width)
-        params.y = clampY(yFromFraction(params.height), params.height)
+        params.x = xFromFraction(params.width)
+        params.y = yFromFraction(params.height)
         lyricRoot?.let { root ->
             runCatching { windowManager.updateViewLayout(root, params) }
         }
@@ -746,7 +752,6 @@ class DesktopLyricService : Service() {
         panelView = null
         playPauseButton = null
         translationButton = null
-        translationStateView = null
     }
 
     private fun positionControlWindow() {
@@ -816,40 +821,18 @@ class DesktopLyricService : Service() {
             setBackgroundColor(adjustAlpha(Color.WHITE, 0.14f))
         }
 
-        val translationToggle = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), dp(4), dp(8), dp(4))
-            setOnClickListener { toggleTranslation() }
-        }
-
-        translationButton = createActionButton(
-            iconRes = R.drawable.ic_lyrics,
+        // 翻译开关：只有一个图标按钮，不带任何文字说明；
+        // 开启/关闭只用「实心 / 空心」区分（实心 = 白色实底 + 深色图标，空心 = 淡底 + 白色线图标）。
+        val translateButton = createActionButton(
+            iconRes = R.drawable.ic_lyric_translate,
             description = "歌词翻译",
-            sizeDp = 28,
-            paddingDp = 5,
-            marginDp = 0
-        ) {}
-        translationButton?.isClickable = false
-        translationButton?.isFocusable = false
-
-        val translationLabel = TextView(this).apply {
-            text = "翻译"
-            setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-            typeface = Typeface.DEFAULT_BOLD
-            setPadding(dp(6), 0, 0, 0)
+            sizeDp = 30,
+            paddingDp = 6,
+            marginDp = 8
+        ) {
+            toggleTranslation()
         }
-
-        translationStateView = TextView(this).apply {
-            setTextColor(adjustAlpha(Color.WHITE, 0.82f))
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(dp(4), 0, 0, 0)
-        }
-
-        translationToggle.addView(translationButton)
-        translationToggle.addView(translationLabel)
-        translationToggle.addView(translationStateView)
+        translationButton = translateButton
 
         val lockButton = createActionButton(
             iconRes = R.drawable.ic_lyric_lock,
@@ -885,7 +868,7 @@ class DesktopLyricService : Service() {
                 marginEnd = dp(6)
             }
         )
-        panel.addView(translationToggle)
+        panel.addView(translateButton)
         panel.addView(lockButton)
         panel.addView(closeButton)
 
@@ -925,13 +908,14 @@ class DesktopLyricService : Service() {
     }
 
     private fun updateTranslationState() {
-        translationButton?.setImageResource(
-            if (style.translationEnabled) R.drawable.ic_lyrics_on else R.drawable.ic_lyrics
-        )
-        translationButton?.setColorFilter(
-            if (style.translationEnabled) Color.WHITE else adjustAlpha(Color.WHITE, 0.82f)
-        )
-        translationStateView?.text = if (style.translationEnabled) "开" else "关"
+        val enabled = style.translationEnabled
+        val button = translationButton ?: return
+        button.setColorFilter(if (enabled) translationActiveGlyphColor else buttonTintColor)
+        button.background = GradientDrawable().apply {
+            shape = GradientDrawable.OVAL
+            setColor(if (enabled) Color.WHITE else buttonBackgroundColor)
+        }
+        button.contentDescription = if (enabled) "歌词翻译：开" else "歌词翻译：关"
     }
 
     private fun togglePanel() {
@@ -1049,9 +1033,9 @@ class DesktopLyricService : Service() {
                             updateControlVisibility()
                         }
                     }
-                    // 拖动中实时夹紧，不让任何一边拖出屏幕。
-                    layoutParams.x = clampX(startX + deltaX.toInt(), layoutParams.width)
-                    layoutParams.y = clampY(startY + deltaY.toInt(), layoutParams.height)
+                    // 不做边界夹紧：歌词窗可以拖到屏幕边缘以外。
+                    layoutParams.x = startX + deltaX.toInt()
+                    layoutParams.y = startY + deltaY.toInt()
                     windowManager.updateViewLayout(v, layoutParams)
                     positionControlWindow()
                     return true

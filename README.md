@@ -120,8 +120,7 @@ ncmapi/src/main/java/com/rcmiku/ncmapi/
 ## 非常感谢
 
 -
-[JetMelo](https://github.com/rcmiku/JetMelo/releases)
-- Jetmelo
+[JetMelo](https://github.com/rcmiku/JetMelo/releases)- Jetmelo
 - [kid-depress/Mooic](https://github.com/kid-depress/Mooic) - Mooic
 - [Moriafly/SaltPlayerSource](https://github.com/Moriafly/SaltPlayerSource) - 椒盐音乐
 - [rinchao0721/Melodia](https://github.com/rinchao0721/Melodia) - Melodia

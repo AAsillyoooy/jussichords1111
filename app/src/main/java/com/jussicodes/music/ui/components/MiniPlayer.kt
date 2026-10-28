@@ -1,11 +1,8 @@
 package com.jussicodes.music.ui.components
 
-import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.basicMarquee
@@ -16,6 +13,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,8 +28,11 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -42,6 +43,7 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -55,7 +57,6 @@ import coil3.compose.AsyncImage
 import com.jussicodes.music.LocalPlayerController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MiniPlayerHeight
-import com.jussicodes.music.ui.icons.ChevronDown
 import com.jussicodes.music.ui.icons.PauseFill
 import com.jussicodes.music.ui.icons.SkipNextFill
 import kotlin.math.abs
@@ -68,20 +69,39 @@ fun MiniPlayer(
     modifier: Modifier = Modifier,
     imageModifier: Modifier = Modifier,
     onClick: () -> Unit = {},
+    bottomExtendDp: Dp = 0.dp,
+    onDragProgressChange: (Float) -> Unit = {},
+    onVerticalDrag: ((Float) -> Unit)? = null,
+    onVerticalDragEnd: ((Float) -> Unit)? = null,
+    dragProgress: Float = 0f,
+    isPillProgress: Boolean = false,
 ) {
     val mediaController = LocalPlayerController.current.controller
     val playerState = LocalPlayerState.current
     val density = LocalDensity.current
-    val swipeOpenThresholdPx = with(density) { 48.dp.toPx() }
-    val swipePreviewLimitPx = with(density) { 96.dp.toPx() }
+    val swipeOpenThresholdPx = with(density) { 40.dp.toPx() }
+    val swipeVelocityThresholdPx = with(density) { 360.dp.toPx() }
+    val swipePreviewLimitPx = with(density) { 140.dp.toPx() }
     val horizontalSwipeThresholdPx = with(density) { 120.dp.toPx() }
     val horizontalPreviewLimitPx = with(density) { 220.dp.toPx() }
     val dragDirectionSlopPx = with(density) { 12.dp.toPx() }
     var playerDragOffsetY by remember { mutableFloatStateOf(0f) }
     var playerDragOffsetX by remember { mutableFloatStateOf(0f) }
+    var isTransitioningToFull by remember { mutableStateOf(false) }
+
+    LaunchedEffect(mediaMetadata) {
+        isTransitioningToFull = false
+        playerDragOffsetY = 0f
+    }
+
+    LaunchedEffect(Unit) {
+        isTransitioningToFull = false
+        playerDragOffsetY = 0f
+    }
+
     val animatedPlayerDragOffsetY by animateFloatAsState(
         targetValue = playerDragOffsetY,
-        animationSpec = MotionSpring.dragOffset,
+        animationSpec = if (isTransitioningToFull) snap() else MotionSpring.dragOffset,
         label = "MiniPlayerDragOffset"
     )
     val animatedPlayerDragOffsetX by animateFloatAsState(
@@ -89,18 +109,17 @@ fun MiniPlayer(
         animationSpec = MotionSpring.dragOffset,
         label = "MiniPlayerHorizontalDragOffset"
     )
-    val arrowBreath by rememberInfiniteTransition(label = "MiniPlayerOpenHint").animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 900),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "MiniPlayerOpenHintBreath"
-    )
-    val miniPlayerCorner = 16.dp
-    val miniPlayerShape = RoundedCornerShape(topStart = miniPlayerCorner, topEnd = miniPlayerCorner)
+    val miniPlayerCorner = if (isPillProgress) 26.dp else 16.dp
+    val miniPlayerShape = if (isPillProgress) RoundedCornerShape(26.dp) else RoundedCornerShape(topStart = miniPlayerCorner, topEnd = miniPlayerCorner)
     val openProgress = (-animatedPlayerDragOffsetY / swipePreviewLimitPx).coerceIn(0f, 1f)
+    SideEffect {
+        onDragProgressChange(openProgress)
+    }
+    val extraBackdropHeight = (-animatedPlayerDragOffsetY * 0.22f).coerceIn(0f, with(density) { 18.dp.toPx() })
+    val backdropHeight = MiniPlayerHeight + with(density) { extraBackdropHeight.toDp() } + bottomExtendDp
+    val artworkLiftPx = animatedPlayerDragOffsetY * 0.72f
+    val artworkScale = 1f + openProgress * 0.28f
+    val controlsAlpha = (1f - openProgress * 1.6f).coerceIn(0f, 1f)
     val horizontalProgress = (abs(animatedPlayerDragOffsetX) / horizontalPreviewLimitPx).coerceIn(0f, 1f)
     val previewProgress = ((horizontalProgress - 0.42f) / 0.58f).coerceIn(0f, 1f)
     val player = playerState?.player
@@ -128,11 +147,9 @@ fun MiniPlayer(
         Box(
             modifier = modifier
                 .fillMaxWidth()
-                .graphicsLayer {
-                    translationY = animatedPlayerDragOffsetY * 0.65f
-                }
                 .pointerInput(
                     swipeOpenThresholdPx,
+                    swipeVelocityThresholdPx,
                     swipePreviewLimitPx,
                     horizontalSwipeThresholdPx,
                     horizontalPreviewLimitPx,
@@ -143,12 +160,15 @@ fun MiniPlayer(
                         var totalDragX = 0f
                         var totalDragY = 0f
                         var isHorizontalDrag: Boolean? = null
+                        val velocityTracker = VelocityTracker()
+                        velocityTracker.addPosition(down.uptimeMillis, down.position)
 
                         while (true) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
                             if (!change.pressed) break
 
+                            velocityTracker.addPosition(change.uptimeMillis, change.position)
                             val positionChange = change.positionChange()
                             totalDragX += positionChange.x
                             totalDragY += positionChange.y
@@ -169,9 +189,15 @@ fun MiniPlayer(
                                 }
 
                                 false -> {
-                                    if (positionChange.y < 0f || playerDragOffsetY < 0f) {
+                                    if (onVerticalDrag != null) {
                                         change.consume()
-                                        playerDragOffsetY = (playerDragOffsetY + positionChange.y).coerceIn(
+                                        onVerticalDrag(positionChange.y)
+                                    } else if (positionChange.y < 0f || playerDragOffsetY < 0f) {
+                                        change.consume()
+                                        // 渐进式阻尼：越向上拉阻力越大，手感柔韧不撞墙
+                                        val pullRatio = (-playerDragOffsetY / swipePreviewLimitPx).coerceIn(0f, 1f)
+                                        val resistance = 1f - pullRatio * 0.45f
+                                        playerDragOffsetY = (playerDragOffsetY + positionChange.y * resistance).coerceIn(
                                             -swipePreviewLimitPx,
                                             0f
                                         )
@@ -182,6 +208,7 @@ fun MiniPlayer(
                             }
                         }
 
+                        val velocity = velocityTracker.calculateVelocity()
                         if (isHorizontalDrag == true) {
                             when {
                                 playerDragOffsetX <= -horizontalSwipeThresholdPx -> {
@@ -201,11 +228,17 @@ fun MiniPlayer(
                             }
                             playerDragOffsetX = 0f
                         } else if (isHorizontalDrag == false) {
-                            if (-playerDragOffsetY >= swipeOpenThresholdPx) {
-                                playerDragOffsetY = 0f
-                                onClick()
+                            if (onVerticalDragEnd != null) {
+                                onVerticalDragEnd(velocity.y)
                             } else {
-                                playerDragOffsetY = 0f
+                                val isFlingUp = velocity.y <= -swipeVelocityThresholdPx
+                                val isDragUp = -playerDragOffsetY >= swipeOpenThresholdPx
+                                if (isFlingUp || isDragUp) {
+                                    isTransitioningToFull = true
+                                    onClick()
+                                } else {
+                                    playerDragOffsetY = 0f
+                                }
                             }
                         } else {
                             playerDragOffsetY = 0f
@@ -213,100 +246,127 @@ fun MiniPlayer(
                         }
                     }
                 }
-                .height(MiniPlayerHeight)
+                .height(backdropHeight)
         ) {
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .height(MiniPlayerHeight)
+                    .height(backdropHeight)
                     .clip(miniPlayerShape)
                     .clickable { onClick() }
                     .clipToBounds()
             ) {
                 ArtworkGlassBackdrop(artwork = mediaMetadata.artworkUri)
-            }
-            Icon(
-                imageVector = ChevronDown,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .graphicsLayer {
-                        alpha = openProgress * (0.45f + arrowBreath * 0.55f)
-                        translationY = -animatedPlayerDragOffsetY * 0.65f - 6f - arrowBreath * 8f
-                        rotationZ = 180f
-                    }
-                    .size(28.dp)
-            )
-            previewMediaMetadata?.let {
-                MiniMediaInfo(
-                    mediaMetadata = it,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 6.dp)
-                        .graphicsLayer {
-                            alpha = previewProgress
-                            translationX = if (animatedPlayerDragOffsetX < 0f) {
-                                horizontalPreviewLimitPx + animatedPlayerDragOffsetX
-                            } else {
-                                -horizontalPreviewLimitPx + animatedPlayerDragOffsetX
+
+                // 悬浮胶囊底栏模式：以小播放器自身作为流体进度条（主题色半透明充盈）
+                if (isPillProgress) {
+                    val progressFraction = (position.toFloat() / duration.coerceAtLeast(1L)).coerceIn(0f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .fillMaxWidth(progressFraction)
+                            .background(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.20f)
+                            )
+                            .graphicsLayer {
+                                val combinedProgress = maxOf(openProgress, dragProgress)
+                                alpha = (1f - combinedProgress * 2.5f).coerceIn(0f, 1f)
                             }
-                        },
-                    artworkCorner = miniPlayerCorner
-                )
+                    )
+                }
             }
-            LinearProgressIndicator(
-                progress = { (position.toFloat() / duration).coerceIn(0f, 1f) },
+            Box(
                 modifier = Modifier
+                    .align(Alignment.TopCenter)
                     .fillMaxWidth()
-                    .height(3.dp)
-                    .align(Alignment.BottomCenter),
-            )
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(end = 6.dp),
+                    .height(MiniPlayerHeight)
             ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .graphicsLayer {
-                            translationX = animatedPlayerDragOffsetX
-                            alpha = 1f - previewProgress
-                        }
-                ) {
+                previewMediaMetadata?.let {
                     MiniMediaInfo(
-                        mediaMetadata = mediaMetadata,
-                        modifier = Modifier.padding(horizontal = 6.dp),
-                        imageModifier = imageModifier,
+                        mediaMetadata = it,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 6.dp)
+                            .graphicsLayer {
+                                alpha = previewProgress
+                                translationX = if (animatedPlayerDragOffsetX < 0f) {
+                                    horizontalPreviewLimitPx + animatedPlayerDragOffsetX
+                                } else {
+                                    -horizontalPreviewLimitPx + animatedPlayerDragOffsetX
+                                }
+                            },
                         artworkCorner = miniPlayerCorner
                     )
                 }
-
-                IconButton(
-                    enabled = true,
-                    onClick = {
-                        if (playerState?.isPlaying == true)
-                            mediaController?.pause()
-                        else
-                            mediaController?.play()
-                    }
-                ) {
-                    Icon(
-                        imageVector = if (playerState?.isPlaying == true) PauseFill else Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(24.dp)
+                if (!isPillProgress) {
+                    LinearProgressIndicator(
+                        progress = { (position.toFloat() / duration).coerceIn(0f, 1f) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(3.dp)
+                            .align(Alignment.BottomCenter)
+                            .graphicsLayer {
+                                val combinedProgress = maxOf(openProgress, dragProgress)
+                                alpha = if (combinedProgress > 0.01f) 0f else 1f
+                            },
                     )
                 }
-                IconButton(
-                    enabled = true,
-                    onClick = {
-                        mediaController?.seekToNext()
-                    }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(end = 6.dp),
                 ) {
-                    Icon(imageVector = SkipNextFill, contentDescription = null, modifier = Modifier.size(24.dp))
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .graphicsLayer {
+                                translationX = animatedPlayerDragOffsetX
+                                alpha = 1f - previewProgress
+                            }
+                    ) {
+                        MiniMediaInfo(
+                            mediaMetadata = mediaMetadata,
+                            modifier = Modifier.padding(horizontal = 6.dp),
+                            imageModifier = imageModifier,
+                            artworkCorner = miniPlayerCorner,
+                            artworkOffsetY = artworkLiftPx,
+                            artworkScale = artworkScale,
+                            contentAlpha = controlsAlpha,
+                        )
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.graphicsLayer {
+                            alpha = controlsAlpha
+                        }
+                    ) {
+                        IconButton(
+                            enabled = true,
+                            onClick = {
+                                if (playerState?.isPlaying == true)
+                                    mediaController?.pause()
+                                else
+                                    mediaController?.play()
+                            }
+                        ) {
+                            Icon(
+                                imageVector = if (playerState?.isPlaying == true) PauseFill else Icons.Filled.PlayArrow,
+                                contentDescription = null,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        IconButton(
+                            enabled = true,
+                            onClick = {
+                                mediaController?.seekToNext()
+                            }
+                        ) {
+                            Icon(imageVector = SkipNextFill, contentDescription = null, modifier = Modifier.size(24.dp))
+                        }
+                    }
                 }
             }
         }
@@ -318,13 +378,27 @@ fun MiniMediaInfo(
     modifier: Modifier = Modifier,
     imageModifier: Modifier = Modifier,
     artworkCorner: Dp = 16.dp,
+    artworkOffsetY: Float = 0f,
+    artworkScale: Float = 1f,
+    contentAlpha: Float = 1f,
 ) {
-
+    val density = LocalDensity.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
     ) {
-        Box(modifier = Modifier) {
+        Box(
+            modifier = Modifier.graphicsLayer {
+                translationY = artworkOffsetY
+                scaleX = artworkScale
+                scaleY = artworkScale
+                if (artworkOffsetY < -2f) {
+                    shadowElevation = (abs(artworkOffsetY) * 0.45f).coerceIn(0f, with(density) { 14.dp.toPx() })
+                    shape = RoundedCornerShape(artworkCorner)
+                    clip = false
+                }
+            }
+        ) {
             AsyncImage(
                 model = mediaMetadata.artworkUri,
                 contentDescription = null,
@@ -339,6 +413,9 @@ fun MiniMediaInfo(
             modifier = Modifier
                 .weight(1f)
                 .padding(horizontal = 6.dp)
+                .graphicsLayer {
+                    alpha = contentAlpha
+                }
         ) {
             mediaMetadata.title?.let {
                 Text(

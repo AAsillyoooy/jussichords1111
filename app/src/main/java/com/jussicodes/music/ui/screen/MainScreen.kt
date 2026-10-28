@@ -59,6 +59,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -80,6 +82,11 @@ import androidx.navigation.compose.rememberNavController
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MediaSessionConstants
 import com.jussicodes.music.constants.BottomNavigationHeight
+import com.jussicodes.music.constants.FloatingBottomNavigationHeight
+import com.jussicodes.music.constants.FloatingBottomNavHorizontalPadding
+import com.jussicodes.music.constants.FloatingBottomNavBottomPadding
+import com.jussicodes.music.constants.FloatingBottomNavTopPadding
+import com.jussicodes.music.constants.floatingNavBarEnabledKey
 import com.jussicodes.music.animation.MotionDuration
 import com.jussicodes.music.animation.MotionSpec
 import com.jussicodes.music.animation.MotionDefaults
@@ -90,9 +97,12 @@ import com.jussicodes.music.constants.useNavigationRailLayout
 import com.jussicodes.music.data.HomeBgEditor
 import com.jussicodes.music.ui.components.AdaptiveContent
 import com.jussicodes.music.ui.components.AdaptiveNavigationRail
+import com.jussicodes.music.ui.components.BottomBarTab
+import com.jussicodes.music.ui.components.FloatingBottomNavBar
 import com.jussicodes.music.ui.components.HomeBackgroundLayer
 import com.jussicodes.music.ui.components.HomeBgEditPanel
 import com.jussicodes.music.ui.components.rememberHomeBackground
+import com.jussicodes.music.ui.components.floatingNavTabs
 import com.jussicodes.music.ui.components.tabs
 import com.jussicodes.music.ui.navigation.NavGraph
 import com.jussicodes.music.ui.navigation.Screen
@@ -114,8 +124,12 @@ fun MainScreen() {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = navBackStackEntry?.destination
-    val isTabRoute =
+    val floatingNavBarEnabled by rememberPreference(floatingNavBarEnabledKey, false)
+    val activeNavTabs = if (floatingNavBarEnabled) floatingNavTabs else tabs
+    val isHomeRoute =
         currentDestination?.hierarchy?.any { tabs.any { tab -> it.route == tab.route } } == true
+    val isTabRoute =
+        currentDestination?.hierarchy?.any { activeNavTabs.any { tab -> it.route == tab.route } } == true
     val playerState = LocalPlayerState.current
     var position by rememberSaveable(playerState) {
         mutableLongStateOf(playerState?.player?.currentPosition ?: 0)
@@ -129,20 +143,24 @@ fun MainScreen() {
     val currentMediaId = playerState?.currentMediaItem?.mediaId
     var currentPlayMediaId by rememberPreference(currentPlayMediaIdKey, 0)
     var showPlayer by remember { mutableStateOf(false) }
+    var miniPlayerDragProgress by remember { mutableFloatStateOf(0f) }
     var homePage by rememberSaveable { mutableIntStateOf(0) }
     var homePageScroll by remember { mutableFloatStateOf(homePage.toFloat()) }
-    val homePagerState = rememberPagerState(initialPage = homePage) { tabs.size }
+    val homePagerState = rememberPagerState(initialPage = homePage) { activeNavTabs.size }
     val coroutineScope = rememberCoroutineScope()
-    val isHomeRoute = isTabRoute
-    // 壁纸层可见性：isTabRoute 去抖版（见 AnimatedVisibility 处的注释）。
-    // 进二级页仍会淡出，但 tab<->tab 切换的中间假false 帧被滤掉，壁纸不再闪。
+    BackHandler(enabled = isHomeRoute && homePagerState.currentPage > 0) {
+        coroutineScope.launch {
+            homePagerState.animateScrollToPage(homePagerState.currentPage - 1)
+        }
+    }
+    // 壁纸层可见性：isHomeRoute 去抖版（主页两 tab 切换不闪，进设置/二级页淡出）
     var homeBackgroundVisible by remember { mutableStateOf(true) }
-    LaunchedEffect(isTabRoute) {
-        if (isTabRoute) {
+    LaunchedEffect(isHomeRoute) {
+        if (isHomeRoute) {
             homeBackgroundVisible = true
         } else {
             delay(200)
-            homeBackgroundVisible = isTabRoute
+            homeBackgroundVisible = isHomeRoute
         }
     }
     val isRoamRoute = currentDestination?.route == Screen.Roam.route
@@ -231,10 +249,21 @@ fun MainScreen() {
     var previousRoute by rememberSaveable { mutableStateOf<String?>(null) }
     LaunchedEffect(currentDestination?.route) {
         val route = currentDestination?.route
+        if (floatingNavBarEnabled && route == Screen.Settings.route) {
+            navController.popBackStack()
+            coroutineScope.launch {
+                MotionDefaults.animatePagerToPage(
+                    pagerState = homePagerState,
+                    page = 2,
+                    scope = coroutineScope
+                )
+            }
+            return@LaunchedEffect
+        }
         val cameFromNonTab = previousRoute != null &&
-            tabs.none { tab -> tab.route == previousRoute }
+            activeNavTabs.none { tab -> tab.route == previousRoute }
         previousRoute = route
-        val targetPage = tabs.indexOfFirst { it.route == route }.takeIf { it >= 0 }
+        val targetPage = activeNavTabs.indexOfFirst { it.route == route }.takeIf { it >= 0 }
         if (targetPage != null && cameFromNonTab) {
             homePage = targetPage
             homePageScroll = targetPage.toFloat()
@@ -301,18 +330,24 @@ fun MainScreen() {
             SnackbarHost(hostState = snackbarHostState)
         },
         bottomBar = {
-            // Compact 用底栏；Medium/Expanded 改左侧竖排导航栏（见 content 里的 Row），
-            // 底栏此时不占位，否则大屏上会多出一条空横条。
-            if (!useNavigationRail) Column {
+            // Compact 用底栏；Medium/Expanded 改左侧竖排导航栏（见 content 里的 Row）。
+            // 悬浮胶囊底栏改在 content 顶层浮动挂载，让主页背景与列表直接延伸到底部手势栏，胶囊外完全透明；
+            // 经典底栏则保留挂载在 Scaffold.bottomBar 贴底槽位。
+            if (!floatingNavBarEnabled && !useNavigationRail) Column {
                 AnimatedVisibility(
                     showNavigationBar,
                     enter = expandVertically(),
                     exit = shrinkVertically()
                 ) {
-                    // 底栏底色跟随主题 surface（壁纸动态取色时一起变），不再用 M3 默认的
-                    // surfaceContainerHigh（它不随动态壁纸色）。
+                    val navBarFullHeight = BottomNavigationHeight + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+                    val navBarExitProgress = (miniPlayerDragProgress * 3f).coerceIn(0f, 1f)
                     NavigationBar(
-                        modifier = Modifier.height(BottomNavigationHeight),
+                        modifier = Modifier
+                            .graphicsLayer {
+                                val maxPressDownPx = navBarFullHeight.toPx()
+                                translationY = navBarExitProgress * maxPressDownPx
+                            }
+                            .height(BottomNavigationHeight),
                         containerColor = MaterialTheme.colorScheme.surface,
                         contentColor = MaterialTheme.colorScheme.onSurface,
                     ) {
@@ -409,11 +444,12 @@ fun MainScreen() {
             }
         },
         content = { padding ->
+            val floatingNavBarFullHeight = FloatingBottomNavigationHeight + FloatingBottomNavBottomPadding + FloatingBottomNavTopPadding + WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             // 小播放器贴底间距（与 main 一致的位置逻辑：首页=底栏上方，二级页=贴系统导航栏，
             // 不加额外高度避免和底栏顶开缝），套 200ms 缓入缓出：进出设置页时下滑/回位平滑。
             val targetMiniBottomPadding = when {
                 showPlayer -> 0.dp
-                navBarTakesBottomSpace -> padding.calculateBottomPadding()
+                navBarTakesBottomSpace -> if (floatingNavBarEnabled) floatingNavBarFullHeight else padding.calculateBottomPadding()
                 else -> WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             }
             // 内容区跟小播放器用同一个贴底间距（无整体垫高）：首页列表的底部避让
@@ -452,37 +488,18 @@ fun MainScreen() {
                 }
             }
 
-            Box(
-                contentAlignment = Alignment.BottomCenter,
-                modifier = Modifier
-                    .zIndex(1f)
-                    .fillMaxSize()
-            ) {
-                Box(
-                    modifier = Modifier
-                        .defaultMinSize(minHeight = MiniPlayerHeight)
-                        .windowInsetsPadding(WindowInsets(bottom = miniBottomPadding)),
-                ) {
-                    if (showMiniPlayerChrome) playerState?.mediaMetadata?.let {
-                        PlayerTransform(
-                            mediaMetadata = it,
-                            position = position,
-                            duration = duration,
-                            onBackPressed = { showPlayer = false },
-                            onClick = { showPlayer = true },
-                            onPositionUpdate = { updatePosition ->
-                                position = updatePosition
-                            },
-                            navController = navController,
-                            expandSignal = PlayerExpandBus.token.collectAsState().value
-                        )
-                    }
-                }
-            }
-
             // Expanded（大屏）左侧竖排导航栏；Compact/Medium 保持底部横条。
             // 两者只在这里分叉：rail 占左侧固定宽度，内容区限宽居中（AdaptiveContent）。
-            Row(Modifier.fillMaxSize()) {
+            val bgBlurRadius = (miniPlayerDragProgress * 18f).dp
+            Row(
+                Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (miniPlayerDragProgress > 0.01f) {
+                            Modifier.blur(bgBlurRadius)
+                        } else Modifier
+                    )
+            ) {
                 if (useNavigationRail && showNavigationBar) {
                     AdaptiveNavigationRail(
                         currentRoute = currentDestination?.route,
@@ -510,7 +527,96 @@ fun MainScreen() {
                         bottomPadding = miniBottomPadding,
                         homePagerState = homePagerState,
                         onHomePageChange = { homePage = it },
-                        onHomePageScroll = { homePageScroll = it }
+                        onHomePageScroll = { homePageScroll = it },
+                        floatingNavBarEnabled = floatingNavBarEnabled
+                    )
+                }
+            }
+
+            // 向上滑动播放器时的由浅入深暗色遮罩与景深层次
+            val scrimAlpha = (miniPlayerDragProgress * 0.45f).coerceIn(0f, 0.45f)
+            if (scrimAlpha > 0.001f) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = scrimAlpha))
+                )
+            }
+
+            // 悬浮胶囊底栏：浮在内容层与背景图之上，胶囊周围完全透明穿透
+            if (floatingNavBarEnabled && !useNavigationRail) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .zIndex(0.9f),
+                    contentAlignment = Alignment.BottomCenter
+                ) {
+                    val navBarExitProgress = (miniPlayerDragProgress * 3f).coerceIn(0f, 1f)
+                    AnimatedVisibility(
+                        visible = showNavigationBar,
+                        enter = fadeIn(MotionSpec.screenEnter()) + expandVertically(),
+                        exit = fadeOut(MotionSpec.screenExit()) + shrinkVertically()
+                    ) {
+                        FloatingBottomNavBar(
+                            modifier = Modifier.graphicsLayer {
+                                val maxPressDownPx = floatingNavBarFullHeight.toPx()
+                                translationY = navBarExitProgress * maxPressDownPx
+                            },
+                            displayTabs = floatingNavTabs,
+                            isHomeRoute = isHomeRoute,
+                            homePage = homePage,
+                            homePageScroll = homePageScroll,
+                            isTabSelected = { item ->
+                                if (isHomeRoute) {
+                                    val targetIndex = activeNavTabs.indexOf(item)
+                                    targetIndex >= 0 && homePageScroll.roundToInt() == targetIndex
+                                } else {
+                                    currentDestination?.hierarchy?.any { it.route == item.route } == true
+                                }
+                            },
+                            onTabClick = { item ->
+                                val targetPage = activeNavTabs.indexOfFirst { it.route == item.route }
+                                if (targetPage >= 0) {
+                                    if (isHomeRoute) {
+                                        MotionDefaults.animatePagerToPage(
+                                            pagerState = homePagerState,
+                                            page = targetPage,
+                                            scope = coroutineScope
+                                        )
+                                    } else {
+                                        navigateRootTab(item.route)
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+
+            Box(
+                contentAlignment = Alignment.BottomCenter,
+                modifier = Modifier
+                    .zIndex(1f)
+                    .fillMaxSize()
+            ) {
+                if (showMiniPlayerChrome) playerState?.mediaMetadata?.let {
+                    PlayerTransform(
+                        mediaMetadata = it,
+                        position = position,
+                        duration = duration,
+                        bottomPadding = miniBottomPadding,
+                        floatingNavBarEnabled = floatingNavBarEnabled,
+                        onBackPressed = { showPlayer = false },
+                        onClick = { showPlayer = true },
+                        onPositionUpdate = { updatePosition ->
+                            position = updatePosition
+                        },
+                        navController = navController,
+                        expandSignal = PlayerExpandBus.token.collectAsState().value,
+                        onDragProgressChange = { progress ->
+                            miniPlayerDragProgress = progress
+                            showPlayer = progress >= 0.99f
+                        }
                     )
                 }
             }

@@ -94,6 +94,7 @@ import com.jussicodes.music.constants.resolveAllSongsKey
 import com.jussicodes.music.constants.ncmCookieKey
 import com.jussicodes.music.constants.playerGestureTutorialVersionKey
 import com.jussicodes.music.constants.pinnedAlbumsHiddenKey
+import com.jussicodes.music.constants.floatingNavBarEnabledKey
 import com.jussicodes.music.constants.homeBgBlurKey
 import com.jussicodes.music.constants.homeBgImageKey
 import com.jussicodes.music.constants.homeBgOffsetXKey
@@ -122,6 +123,7 @@ import com.jussicodes.music.ui.icons.Github
 import com.jussicodes.music.ui.icons.Login
 import com.jussicodes.music.ui.icons.Logout
 import com.jussicodes.music.ui.icons.MusicNote
+import com.jussicodes.music.ui.icons.NavigationPill
 import com.jussicodes.music.ui.icons.Palette
 import com.jussicodes.music.ui.icons.Remove
 import com.jussicodes.music.ui.icons.Script
@@ -164,7 +166,10 @@ import com.jussicodes.music.ui.components.ResponsiveAlertDialog
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(navController: NavHostController) {
+fun SettingsScreen(
+    navController: NavHostController,
+    onBackClick: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -180,6 +185,7 @@ fun SettingsScreen(navController: NavHostController) {
     )
     var ncmCookie by rememberPreference(ncmCookieKey, "")
     var pinnedAlbumsHidden by rememberPreference(pinnedAlbumsHiddenKey, false)
+    var floatingNavBarEnabled by rememberPreference(floatingNavBarEnabledKey, false)
     var apiBaseUrl by rememberPreference(apiBaseUrlKey, "")
     var unblockSource by rememberPreference(unblockSourceKey, "AUTO")
     // 音源三选一（LX / 内置直连 / 代理）。旧选择由 JetMeloApp 里的一次性迁移清掉，
@@ -563,6 +569,22 @@ fun SettingsScreen(navController: NavHostController) {
                 onClick = { showThemeColorSourceDialog = true }
             ),
             SettingItemData(
+                title = "悬浮胶囊底栏",
+                subtitle = if (floatingNavBarEnabled) {
+                    "已开启 · 悬浮胶囊样式"
+                } else {
+                    "已关闭 · 经典贴底通栏"
+                },
+                imageVector = NavigationPill,
+                trailingContent = {
+                    Switch(
+                        checked = floatingNavBarEnabled,
+                        onCheckedChange = { floatingNavBarEnabled = it }
+                    )
+                    Spacer(Modifier.width(12.dp))
+                }
+            ),
+            SettingItemData(
                 title = "桌面歌词",
                 subtitle = (if (lyricOn) {
                     "已开启 · ${desktopLyricFontSize.toInt()}sp" +
@@ -800,7 +822,13 @@ fun SettingsScreen(navController: NavHostController) {
             TopAppBar(
                 title = { Text(stringResource(R.string.settings)) },
                 navigationIcon = {
-                    IconButton(onClick = { navController.navigateUp() }) {
+                    IconButton(onClick = {
+                        if (onBackClick != null) {
+                            onBackClick()
+                        } else {
+                            navController.navigateUp()
+                        }
+                    }) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = null

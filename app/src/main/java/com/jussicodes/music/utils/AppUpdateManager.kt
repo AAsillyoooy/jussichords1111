@@ -7,22 +7,30 @@ import android.net.Uri
 import android.os.Build
 import androidx.core.content.FileProvider
 import com.jussicodes.music.BuildConfig
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.InetAddress
 import java.net.SocketTimeoutException
 import java.util.concurrent.TimeUnit
 import kotlin.system.measureTimeMillis
@@ -70,6 +78,8 @@ sealed class UpdateSource {
     abstract fun probeRequest(): Request
 }
 
+const val SPEED_TEST_SAMPLE_BYTES = 262144L // 256 KB 测速分片：兼顾准确率与极速响应，避免弱网超时
+
 class GitHubUpdateSource(
     override val id: String,
     override val name: String,
@@ -101,22 +111,93 @@ class GitHubUpdateSource(
             .header("Accept", "application/octet-stream")
             .header("User-Agent", "jussichords/${BuildConfig.VERSION_NAME}")
             .build()
+
+    /** 构造 512KB 分段的 Range 测速请求（测真实下载吞吐） */
+    fun speedTestRequest(targetDownloadUrl: String?): Request {
+        val canonical = targetDownloadUrl ?: canonicalGitHubDownloadUrl("v2.3.4", "jussichords-v2.3.4.apk")
+        val url = toDownloadUrl(canonical)
+        return Request.Builder()
+            .url(url)
+            .header("Range", "bytes=0-${SPEED_TEST_SAMPLE_BYTES - 1}")
+            .header("User-Agent", "jussichords/${BuildConfig.VERSION_NAME}")
+            .header("Accept", "*/*")
+            .build()
+    }
 }
 
 /**
- * 全局下载源列表：gh-proxy 节点池，按顺序回落。
+ * 针对自建 Worker 域名（gh.jussichords.cc.cd）的动态自适应优选 IP 解析器。
+ * 覆盖国内三网官方高质量 Anycast 节点，支持从自建 Worker 动态下发最新的官方优选 IP，并结合系统原生解析双保险兜底。
+ */
+object CloudflareOptimizedDns : Dns {
+    private const val TARGET_HOST = "gh.jussichords.cc.cd"
+    private const val BEST_IPS_ENDPOINT = "https://gh.jussichords.cc.cd/cf-best-ips"
+
+    // 覆盖国内三网常用骨干段的高质量 Anycast 候选池（含官方实测优质三网节点）
+    val DEFAULT_IPS = listOf(
+        "172.64.145.93",
+        "172.64.145.202",
+        "104.18.33.196",
+        "104.18.42.163",
+        "104.18.40.152",
+        "172.64.147.104",
+        "104.21.69.77",
+        "172.67.206.74",
+        "104.19.18.1",
+        "104.16.80.1",
+    )
+
+    @Volatile
+    private var dynamicIps: List<String> = DEFAULT_IPS
+
+    @Volatile
+    private var lastFetchedTime: Long = 0L
+
+    /** 后台异步从自建 Worker 拉取最新维护的官方 bestcf 节点 */
+    suspend fun fetchDynamicBestIps(client: OkHttpClient) = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (now - lastFetchedTime < 60 * 60 * 1000L) return@withContext // 1小时缓存
+        runCatching {
+            val req = Request.Builder()
+                .url(BEST_IPS_ENDPOINT)
+                .header("User-Agent", "jussichords/${BuildConfig.VERSION_NAME}")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string() ?: return@use
+                    val root = Json.parseToJsonElement(body).jsonObject
+                    val ipsArray = root["ips"]?.jsonArray
+                    val ips = ipsArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                    if (!ips.isNullOrEmpty()) {
+                        dynamicIps = (ips + DEFAULT_IPS).distinct()
+                        lastFetchedTime = now
+                    }
+                }
+            }
+        }
+    }
+
+    override fun lookup(hostname: String): List<InetAddress> {
+        if (hostname.equals(TARGET_HOST, ignoreCase = true)) {
+            val systemResolved = runCatching { Dns.SYSTEM.lookup(hostname) }.getOrDefault(emptyList())
+            val candidateResolved = dynamicIps.mapNotNull { runCatching { InetAddress.getByName(it) }.getOrNull() }
+            return (candidateResolved + systemResolved).distinct()
+        }
+        return Dns.SYSTEM.lookup(hostname)
+    }
+}
+
+/**
+ * 全局下载源列表：gh-proxy 三网优选源 + 自建边缘 Worker 源 + GitHub 直连兜底。
  *
- * - `gh-proxy-v4`：官方转换器里标 recommended 的优选节点（仅 IPv4），默认源。
- * - `gh-proxy-main`：主站加速（Cloudflare），v4 挂掉时的第一条兜底。
- * - `gh-proxy-axisnow`：AxisNow 三网优选（仅 IPv4），线路不同源，前两条同时抽风时还能走。
- *
- * 官方另外两条没有收进来：`v6.gh-proxy.org` 只有 AAAA 记录（无 IPv6 的网络上必然失败一次），
- * `cdn.gh-proxy.org` 是 Fastly 节点，国内实测最慢。
+ * - `gh-proxy-axisnow`：AxisNow 三网优选（axisnow.gh-proxy.org），智能 DNS 分线解析，默认主源。
+ * - `gh-proxy-custom`：自建 Cloudflare Worker 专线（gh.jussichords.cc.cd），开启不可变边缘强缓存与动态 Anycast 优选 IP，备用与容灾。
+ * - `direct`：GitHub 官方直连，原生兜底。
  */
 val downloadSources = listOf(
-    GitHubUpdateSource("gh-proxy-v4", "gh-proxy 优选", "v4.gh-proxy.org · 官方推荐", "https://v4.gh-proxy.org/"),
-    GitHubUpdateSource("gh-proxy-main", "gh-proxy 主站", "gh-proxy.org", "https://gh-proxy.org/"),
     GitHubUpdateSource("gh-proxy-axisnow", "gh-proxy 三网", "axisnow.gh-proxy.org", "https://axisnow.gh-proxy.org/"),
+    GitHubUpdateSource("gh-proxy-custom", "gh.jussichords.cc.cd", "gh.jussichords.cc.cd", "https://gh.jussichords.cc.cd/"),
+    GitHubUpdateSource("direct", "GitHub 直连", "直连", ""),
 )
 
 fun sourceById(sourceId: String?): UpdateSource? =
@@ -148,11 +229,11 @@ private class HttpStatusException(val code: Int, val detail: String = "HTTP $cod
 object AppUpdateManager {
     private const val UPDATE_DIR = "updates"
     private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
-    private const val DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 30L
+    private const val DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 10L
     private const val DOWNLOAD_READ_TIMEOUT_SECONDS = 120L
     private const val DOWNLOAD_CALL_TIMEOUT_SECONDS = 300L
     private const val DOWNLOAD_MAX_RETRIES = 2
-    private const val SOURCE_TEST_TIMEOUT_SECONDS = 3L
+    private const val SOURCE_TEST_TIMEOUT_SECONDS = 6L
     private const val API_CONNECT_TIMEOUT_SECONDS = 6L
     private const val API_READ_TIMEOUT_SECONDS = 10L
     private const val API_CALL_TIMEOUT_SECONDS = 15L
@@ -168,6 +249,7 @@ object AppUpdateManager {
 
     private val downloadClient by lazy {
         OkHttpClient.Builder()
+            .dns(CloudflareOptimizedDns)
             .connectTimeout(DOWNLOAD_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(DOWNLOAD_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(DOWNLOAD_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -179,6 +261,7 @@ object AppUpdateManager {
 
     private val sourceTestClient by lazy {
         OkHttpClient.Builder()
+            .dns(CloudflareOptimizedDns)
             .connectTimeout(SOURCE_TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(SOURCE_TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(SOURCE_TEST_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -202,6 +285,7 @@ object AppUpdateManager {
 
     private val apiClient by lazy {
         OkHttpClient.Builder()
+            .dns(CloudflareOptimizedDns)
             .connectTimeout(API_CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .readTimeout(API_READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .callTimeout(API_CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
@@ -218,6 +302,10 @@ object AppUpdateManager {
      * 返回 null 表示已最新。
      */
     suspend fun checkUpdate(): Result<UpdateInfo?> = withContext(Dispatchers.IO) {
+        // 后台异步静默拉取最新的官方 Anycast 优选 IP（1小时内只拉一次）
+        CoroutineScope(Dispatchers.IO).launch {
+            CloudflareOptimizedDns.fetchDynamicBestIps(apiClient)
+        }
         runCatching { resolveUpdate() }
     }
 
@@ -253,6 +341,7 @@ object AppUpdateManager {
                 if (isStaleCanaryTag(result.versionName, BuildConfig.VERSION_NAME)) {
                     continue
                 }
+                cachedLatestDownloadUrl = result.downloadUrl
                 return result
             } catch (e: Throwable) {
                 lastError = e
@@ -464,27 +553,82 @@ object AppUpdateManager {
         }
     }
 
-    /** 并行探测全部下载源（各源自探测），返回延迟与可用性，供「Ping」弹窗展示。 */
-    suspend fun measureDownloadSources(): List<UpdateSourceStatus> =
+    @Volatile
+    private var cachedLatestDownloadUrl: String? = null
+
+    /**
+     * 并行真实测速全部下载源：
+     * 1. 触发自建源本地网络最优 Anycast IP 并发测速与选优（针对不同地区/运营商自适应）；
+     * 2. 对每个源发起 512KB Range 分段下载，计算真实下载吞吐速率（MB/s / KB/s）；
+     * 3. 失败时回落到错误原因展示。
+     */
+    suspend fun measureDownloadSources(targetDownloadUrl: String? = null): List<UpdateSourceStatus> =
         withContext(Dispatchers.IO) {
+            runCatching { CloudflareOptimizedDns.fetchDynamicBestIps(apiClient) }
+
+            val targetUrl = targetDownloadUrl ?: cachedLatestDownloadUrl
+
             supervisorScope {
                 downloadSources.map { source ->
                     async {
                         runCatching {
+                            if (source !is GitHubUpdateSource) {
+                                val elapsed = measureTimeMillis {
+                                    sourceTestClient.newCall(source.probeRequest()).execute().use { response ->
+                                        if (!response.isSuccessful && response.code !in 300..399) {
+                                            throw HttpStatusException(response.code)
+                                        }
+                                    }
+                                }
+                                return@async UpdateSourceStatus(source, elapsed, true, "可用", null, "${elapsed} ms")
+                            }
+
+                            val request = source.speedTestRequest(targetUrl)
+                            var bytesRead = 0L
+                            var rttMs = 0L
+
                             val elapsed = measureTimeMillis {
-                                sourceTestClient.newCall(source.probeRequest()).execute().use { response ->
-                                    if (!response.isSuccessful && response.code !in 300..399) {
-                                        throw HttpStatusException(response.code)
+                                val callStart = System.currentTimeMillis()
+                                sourceTestClient.newCall(request).execute().use { response ->
+                                    if (response.code !in listOf(200, 206)) {
+                                        throw HttpStatusException(response.code, "HTTP ${response.code}")
+                                    }
+                                    rttMs = System.currentTimeMillis() - callStart
+                                    val body = response.body ?: throw IOException("Empty response body")
+                                    val buffer = ByteArray(8192)
+                                    body.byteStream().use { input ->
+                                        while (bytesRead < SPEED_TEST_SAMPLE_BYTES) {
+                                            val toRead = (SPEED_TEST_SAMPLE_BYTES - bytesRead)
+                                                .coerceAtMost(buffer.size.toLong()).toInt()
+                                            val read = input.read(buffer, 0, toRead)
+                                            if (read == -1) break
+                                            bytesRead += read
+                                        }
                                     }
                                 }
                             }
-                            UpdateSourceStatus(source, elapsed, true, "可用")
+
+                            if (bytesRead == 0L) throw IOException("No data received")
+
+                            val speedBps = if (elapsed > 0) (bytesRead * 1000L) / elapsed else 0L
+                            val speedText = formatSpeed(speedBps)
+
+                            UpdateSourceStatus(
+                                source = source,
+                                latencyMs = rttMs.takeIf { it > 0 } ?: elapsed,
+                                available = true,
+                                message = "可用",
+                                speedBps = speedBps,
+                                speedText = speedText,
+                            )
                         }.getOrElse { throwable ->
                             UpdateSourceStatus(
                                 source = source,
                                 latencyMs = null,
                                 available = false,
                                 message = pingFailureDetail(throwable),
+                                speedBps = null,
+                                speedText = null,
                             )
                         }
                     }
@@ -655,6 +799,16 @@ object AppUpdateManager {
     private fun Throwable.isRetryableDownloadError(): Boolean =
         this is SocketTimeoutException || this is IOException
 
+    private fun formatSpeed(bytesPerSec: Long): String {
+        val mb = bytesPerSec / (1024.0 * 1024.0)
+        return if (mb >= 1.0) {
+            String.format(java.util.Locale.US, "%.1f MB/s", mb)
+        } else {
+            val kb = bytesPerSec / 1024.0
+            String.format(java.util.Locale.US, "%.0f KB/s", kb)
+        }
+    }
+
     /** Ping/探测失败时的简短说明，给对话框里逐行展示用。 */
     private fun pingFailureDetail(throwable: Throwable): String = when (throwable) {
         is SocketTimeoutException -> "超时"
@@ -669,6 +823,8 @@ data class UpdateSourceStatus(
     val latencyMs: Long?,
     val available: Boolean,
     val message: String,
+    val speedBps: Long? = null,
+    val speedText: String? = null,
 )
 
 /** 预设 ncmapi 后端的 Ping 结果：URL、延迟（ms）、是否可用、说明文案。 */

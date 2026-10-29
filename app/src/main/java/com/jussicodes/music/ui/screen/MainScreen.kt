@@ -79,6 +79,7 @@ import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.media3.common.Player
 import com.jussicodes.music.LocalPlayerState
 import com.jussicodes.music.constants.MediaSessionConstants
 import com.jussicodes.music.constants.BottomNavigationHeight
@@ -106,6 +107,7 @@ import com.jussicodes.music.ui.components.floatingNavTabs
 import com.jussicodes.music.ui.components.tabs
 import com.jussicodes.music.ui.navigation.NavGraph
 import com.jussicodes.music.ui.navigation.Screen
+import com.jussicodes.music.extensions.playMediaAt
 import com.jussicodes.music.extensions.toMediaItemList
 import com.jussicodes.music.utils.MenuSnackbarBus
 import com.jussicodes.music.utils.MiniPlayerHiddenBus
@@ -195,27 +197,35 @@ fun MainScreen() {
     LaunchedEffect(
         playerState?.currentMediaItem,
         playerState?.mediaItemIndex,
-        playerState?.timeline?.windowCount
+        playerState?.timeline?.windowCount,
+        playerState?.playbackState
     ) {
         val player = playerState?.player ?: return@LaunchedEffect
         val sourceName = playerState.currentMediaItem?.mediaMetadata?.extras
             ?.getString(MediaSessionConstants.EXTRA_SOURCE_NAME)
         if (sourceName != PERSONAL_FM_SOURCE) return@LaunchedEffect
 
+        val isEnded = playerState.playbackState == Player.STATE_ENDED
         val itemCount = player.mediaItemCount
-        if (itemCount == 0 || player.currentMediaItemIndex < itemCount - 2) return@LaunchedEffect
+        val shouldPreload = itemCount > 0 && player.currentMediaItemIndex >= itemCount - 2
+        if (!isEnded && !shouldPreload) return@LaunchedEffect
 
         PersonalFmQueueLoader.load().onSuccess { songs ->
             val existingIds = (0 until player.mediaItemCount)
                 .mapTo(mutableSetOf()) { player.getMediaItemAt(it).mediaId }
             val newSongs = songs.filter { it.id.toString() !in existingIds }
             if (newSongs.isNotEmpty()) {
+                val wasEnded = player.playbackState == Player.STATE_ENDED
+                val startIndex = player.mediaItemCount
                 player.addMediaItems(
                     newSongs.toMediaItemList(
                         sourceName = PERSONAL_FM_SOURCE,
                         sourceType = MediaSessionConstants.SOURCE_TYPE_ROAM
                     )
                 )
+                if (wasEnded) {
+                    player.playMediaAt(startIndex)
+                }
             }
         }
     }
@@ -458,7 +468,6 @@ fun MainScreen() {
             // 小播放器贴底间距（与 main 一致的位置逻辑：首页=底栏上方，二级页=贴系统导航栏，
             // 不加额外高度避免和底栏顶开缝），套 200ms 缓入缓出：进出设置页时下滑/回位平滑。
             val targetMiniBottomPadding = when {
-                showPlayer -> 0.dp
                 navBarTakesBottomSpace -> if (floatingNavBarEnabled) floatingNavBarFullHeight else padding.calculateBottomPadding()
                 else -> WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
             }

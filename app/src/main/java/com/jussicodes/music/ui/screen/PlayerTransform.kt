@@ -45,11 +45,13 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.lerp
+import androidx.compose.ui.zIndex
 import androidx.media3.common.MediaMetadata
 import androidx.navigation.NavHostController
 import com.jussicodes.music.animation.AlbumArtBoundsTransform
 import com.jussicodes.music.animation.MotionDuration
 import com.jussicodes.music.animation.MotionSpec
+import com.jussicodes.music.animation.MotionSpring
 import com.jussicodes.music.animation.PanelBoundsPlaceHolder
 import com.jussicodes.music.animation.SharedArtwork
 import com.jussicodes.music.constants.BottomNavigationHeight
@@ -100,26 +102,41 @@ fun PlayerTransform(
 
         val sheetTranslationY = remember { Animatable(collapsedTargetY) }
 
-        // 当底栏尺寸或屏幕旋转等导致 collapsedTargetY 变化时，如果在收起态则同步调整位移
-        LaunchedEffect(collapsedTargetY, isExpanded) {
-            if (!isExpanded) {
-                sheetTranslationY.snapTo(collapsedTargetY)
+        // 收起：只有 animateTo 真正跑完（未被新动画/手势打断）才落定状态并回调。
+        // 绝不能用 try/finally —— 手势 snapTo 打断动画时 finally 照样执行，
+        // 会把「已经弹回全屏」的面板写成 isExpanded=false，导致返回键不拦截、下滑手势失效。
+        fun collapseSheet(velocityY: Float = 0f) {
+            isExpanded = false
+            coroutineScope.launch {
+                sheetTranslationY.animateTo(
+                    targetValue = collapsedTargetY,
+                    animationSpec = MotionSpring.sheetCollapse,
+                    initialVelocity = velocityY
+                )
+                // 能走到这里说明动画正常结束；被打断会抛 CancellationException 从这里直接跳走
+                onBackPressed()
             }
         }
 
-        // 外部信号（如私信一起听进房成功）请求展开全屏播放界面
-        var lastExpanded by remember { mutableStateOf(expandSignal) }
+        fun expandSheet(velocityY: Float = 0f) {
+            isExpanded = true
+            coroutineScope.launch {
+                sheetTranslationY.animateTo(
+                    targetValue = 0f,
+                    animationSpec = MotionSpring.sheetExpand,
+                    initialVelocity = velocityY
+                )
+                onClick()
+            }
+        }
+
+        // 外部信号（如私信一起听进房成功、主页点击私人 FM 电台）请求展开全屏播放界面。
+        // 初值恒为 0L：冷启动空播放器首次加载并展开时，expandSignal > 0 能被正确捕获触发。
+        var lastExpanded by remember { mutableStateOf(0L) }
         LaunchedEffect(expandSignal) {
             if (expandSignal > lastExpanded) {
                 lastExpanded = expandSignal
-                isExpanded = true
-                coroutineScope.launch {
-                    sheetTranslationY.animateTo(
-                        0f,
-                        spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)
-                    )
-                }
-                onClick()
+                expandSheet()
             }
         }
 
@@ -129,23 +146,32 @@ fun PlayerTransform(
             if (isExpanded) 1f else 0f
         }
 
+        // 物理态（唯一可信来源）：直接由位移反推，而不是信任 isExpanded 布尔值。
+        // 手势/返回键/图层显隐全部以它为准，任何一次时序抖动都不会让面板「看得见却点不动」。
+        val isFullyExpanded = progress >= 0.999f
+
+        // 当底栏尺寸或屏幕旋转等导致 collapsedTargetY 变化时，仅在「静止且物理上确实停在收起位」时重新贴合。
+        // 不能拿 isExpanded 当条件：收起动画一开始就会把它置 false，此时若 snapTo 会把动画瞬跳成终端值。
+        LaunchedEffect(collapsedTargetY, isFullyExpanded) {
+            if (!isFullyExpanded && !sheetTranslationY.isRunning &&
+                sheetTranslationY.value >= collapsedTargetY * 0.85f
+            ) {
+                sheetTranslationY.snapTo(collapsedTargetY)
+            }
+        }
+
         SideEffect {
             onDragProgressChange(progress)
         }
 
         // 拦截系统返回键：展开时优先优雅滑下收起面板
-        BackHandler(enabled = isExpanded) {
+        // 判定用「物理位移已达全屏 或 逻辑上已展开」——即便布尔值被一次动画打断写坏，
+        // 返回键也一定有人拦截，绝不会退回桌面。
+        BackHandler(enabled = isFullyExpanded || isExpanded) {
             if (fullPlayerSubView != FULL_PLAYER) {
                 fullPlayerSubView = FULL_PLAYER
             } else {
-                isExpanded = false
-                coroutineScope.launch {
-                    sheetTranslationY.animateTo(
-                        collapsedTargetY,
-                        spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)
-                    )
-                    onBackPressed()
-                }
+                collapseSheet()
             }
         }
 
@@ -157,56 +183,43 @@ fun PlayerTransform(
             }
         }
 
-        fun onDragEnd(velocityY: Float) {
+        fun onDragEnd(velocityY: Float, startedExpanded: Boolean) {
             coroutineScope.launch {
                 val current = sheetTranslationY.value
                 val dismissThresholdPx = with(density) { 80.dp.toPx() }
-                if (isExpanded) {
-                    // 全屏状态下向下滑动退出：阈值 80dp 或向下的甩动速度
+                if (startedExpanded) {
+                    // 全屏状态下向下滑动退出：阈值 80dp 或向下的甩动速度，继承松手垂直初速度
                     val dragDistanceDown = current
                     val isDragDown = dragDistanceDown >= dismissThresholdPx
                     val isFlingDown = velocityY >= 400f
                     if (isDragDown || isFlingDown) {
-                        isExpanded = false
-                        sheetTranslationY.animateTo(
-                            collapsedTargetY,
-                            spring(dampingRatio = 0.86f, stiffness = Spring.StiffnessMediumLow)
-                        )
-                        onBackPressed()
+                        collapseSheet(velocityY)
                     } else {
                         // 未达阈值平滑回弹全屏
                         sheetTranslationY.animateTo(
-                            0f,
-                            spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)
+                            targetValue = 0f,
+                            animationSpec = MotionSpring.sheetCollapse,
+                            initialVelocity = velocityY
                         )
                     }
                 } else {
                     // 收起状态下向上滑动展开：
-                    // 1. 阈值提高至 72dp 或拉动比例达到 30%，避免误碰灵敏触发；
-                    // 2. 如果已推到顶部附近（接近 0 或比例 >= 85%），100% 顺畅吸附全屏，绝不回弹崩溃；
-                    // 3. 甩手速度提高至 -500f，避免轻微晃动被误判为甩动。
+                    // 1. 阈值调至 24dp 或比例 10%，轻松上滑即可触发展开；
+                    // 2. 快速上滑甩动速度降低至 -200f，支持随手快速轻扫打开；
+                    // 3. 接近顶部时（接近 0 或比例 >= 85%），顺畅吸附全屏。
                     val dragDistanceUp = collapsedTargetY - current
-                    val expandThresholdPx = with(density) { 72.dp.toPx() }
+                    val expandThresholdPx = with(density) { 24.dp.toPx() }
                     val currentProgress = if (collapsedTargetY > 0f) {
                         ((collapsedTargetY - current) / collapsedTargetY).coerceIn(0f, 1f)
                     } else 0f
                     val isNearTop = current <= with(density) { 48.dp.toPx() } || currentProgress >= 0.85f
-                    val isDragUp = dragDistanceUp >= expandThresholdPx || currentProgress >= 0.30f
-                    val isFlingUp = velocityY <= -500f
+                    val isDragUp = dragDistanceUp >= expandThresholdPx || currentProgress >= 0.10f
+                    val isFlingUp = velocityY <= -200f
                     if (isNearTop || isDragUp || isFlingUp) {
-                        isExpanded = true
-                        sheetTranslationY.animateTo(
-                            0f,
-                            spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)
-                        )
-                        onClick()
+                        expandSheet(velocityY)
                     } else {
                         // 未达阈值平滑回弹收起
-                        sheetTranslationY.animateTo(
-                            collapsedTargetY,
-                            spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)
-                        )
-                        onBackPressed()
+                        collapseSheet(velocityY)
                     }
                 }
             }
@@ -275,46 +288,13 @@ fun PlayerTransform(
                     modifier = Modifier.fillMaxSize()
                 )
 
-                // 小播放器层（MiniPlayer 顶栏，高度 64dp）
-                // 拖拽过程中（!isExpanded）保持节点存活，绝不在推到顶部瞬间被拔除导致手势中断
-                val showMiniPlayerContent = !isExpanded || progress < 0.999f
-                if (showMiniPlayerContent) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .fillMaxWidth()
-                            .height(MiniPlayerHeight)
-                            .graphicsLayer {
-                                alpha = miniPlayerAlpha
-                            }
-                    ) {
-                        MiniPlayer(
-                            mediaMetadata = mediaMetadata,
-                            position = position,
-                            duration = duration,
-                            isPillProgress = floatingNavBarEnabled,
-                            onClick = {
-                                coroutineScope.launch {
-                                    isExpanded = true
-                                    sheetTranslationY.animateTo(
-                                        0f,
-                                        spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow)
-                                    )
-                                    onClick()
-                                }
-                            },
-                            onVerticalDrag = { deltaY -> onDrag(deltaY) },
-                            onVerticalDragEnd = { velocityY -> onDragEnd(velocityY) },
-                            dragProgress = progress,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    }
-                }
-
                 // 全屏播放器层（带 touchSlop 下拉手势，绝不误拦截左上角返回按钮等子组件点击）
-                if (progress > 0.01f) {
+                // 仅在展开态或手势拖拽中挂载，收起态彻底卸载，绝不遮挡小播放器手势
+                val shouldComposeFullPlayer = isFullyExpanded || progress > 0.001f
+                if (shouldComposeFullPlayer) {
                     Box(
                         modifier = Modifier
+                            .zIndex(if (progress >= 0.5f) 2f else 0f)
                             .fillMaxWidth()
                             .height(with(density) { screenHeightPx.toDp() })
                             .graphicsLayer {
@@ -322,39 +302,46 @@ fun PlayerTransform(
                                 val scale = 0.94f + 0.06f * progress
                                 scaleX = scale
                                 scaleY = scale
+                                // 视差位移：展开时从下方 36dp 伴随托盘升起优雅浮现，下滑退出时顺应手指流向自然下沉并淡出
+                                translationY = with(density) { 36.dp.toPx() } * (1f - progress)
                             }
-                            .pointerInput(isExpanded) {
-                                if (isExpanded) {
-                                    awaitEachGesture {
-                                        val down = awaitFirstDown(requireUnconsumed = false)
-                                        val velocityTracker = VelocityTracker()
-                                        velocityTracker.addPosition(down.uptimeMillis, down.position)
-                                        var totalDragY = 0f
-                                        var isDraggingDown = false
+                            // 手势探测器只装一次（key=Unit）：用 pointerInput(isExpanded) 做 key 时，
+                            // 状态一旦抖动就会中途重启手势协程，用户正在拖的那一次手势直接作废。
+                            // 是否接管改为「按下瞬间」按物理位移判定，与布尔状态完全解耦。
+                            .pointerInput(Unit) {
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false)
+                                    // 全屏（位移贴近顶部）才接管下拉收起，收起态把事件让给小播放条
+                                    val startedExpanded = sheetTranslationY.value <= 0.5f
+                                    if (!startedExpanded) return@awaitEachGesture
 
-                                        while (true) {
-                                            val event = awaitPointerEvent()
-                                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                            if (!change.pressed) break
+                                    val velocityTracker = VelocityTracker()
+                                    velocityTracker.addPosition(down.uptimeMillis, down.position)
+                                    var totalDragY = 0f
+                                    var isDraggingDown = false
 
-                                            velocityTracker.addPosition(change.uptimeMillis, change.position)
-                                            val positionChange = change.positionChange()
-                                            totalDragY += positionChange.y
+                                    while (true) {
+                                        val event = awaitPointerEvent()
+                                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                        if (!change.pressed) break
 
-                                            if (!isDraggingDown && totalDragY > viewConfiguration.touchSlop) {
-                                                isDraggingDown = true
-                                            }
+                                        velocityTracker.addPosition(change.uptimeMillis, change.position)
+                                        val positionChange = change.positionChange()
+                                        totalDragY += positionChange.y
 
-                                            if (isDraggingDown) {
-                                                change.consume()
-                                                onDrag(positionChange.y)
-                                            }
+                                        if (!isDraggingDown && totalDragY > viewConfiguration.touchSlop) {
+                                            isDraggingDown = true
                                         }
 
                                         if (isDraggingDown) {
-                                            val velocityY = velocityTracker.calculateVelocity().y
-                                            onDragEnd(velocityY)
+                                            change.consume()
+                                            onDrag(positionChange.y)
                                         }
+                                    }
+
+                                    if (isDraggingDown) {
+                                        val velocityY = velocityTracker.calculateVelocity().y
+                                        onDragEnd(velocityY, startedExpanded)
                                     }
                                 }
                             }
@@ -376,6 +363,14 @@ fun PlayerTransform(
                                         mediaMetadata = mediaMetadata,
                                         duration = duration,
                                         position = position,
+                                        backHandlerEnabled = false,
+                                        onAfterNavigate = {
+                                            isExpanded = false
+                                            coroutineScope.launch {
+                                                sheetTranslationY.snapTo(collapsedTargetY)
+                                            }
+                                            onBackPressed()
+                                        },
                                         imageModifier = Modifier.sharedElement(
                                             state = rememberSharedContentState(
                                                 key = SharedArtwork.ofMetadata(mediaMetadata)
@@ -385,14 +380,7 @@ fun PlayerTransform(
                                             boundsTransform = AlbumArtBoundsTransform,
                                         ),
                                         onBackPressed = {
-                                            coroutineScope.launch {
-                                                isExpanded = false
-                                                sheetTranslationY.animateTo(
-                                                    collapsedTargetY,
-                                                    spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)
-                                                )
-                                                onBackPressed()
-                                            }
+                                            collapseSheet()
                                         },
                                         onClick = { fullPlayerSubView = LYRIC_VIEW },
                                         onContainerClick = { fullPlayerSubView = PLAY_QUEUE },
@@ -428,6 +416,36 @@ fun PlayerTransform(
                                 }
                             }
                         }
+                    }
+                }
+
+                // 小播放器层（MiniPlayer 顶栏，高度 64dp）
+                // 声明在全屏层之后并赋予高优先级 zIndex，保证收起态小播放器绝对独占手势，绝不被任何底层组件劫持
+                val showMiniPlayerContent = !isFullyExpanded
+                if (showMiniPlayerContent) {
+                    Box(
+                        modifier = Modifier
+                            .zIndex(if (progress < 0.5f) 2f else 0f)
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .height(MiniPlayerHeight)
+                            .graphicsLayer {
+                                alpha = miniPlayerAlpha
+                            }
+                    ) {
+                        MiniPlayer(
+                            mediaMetadata = mediaMetadata,
+                            position = position,
+                            duration = duration,
+                            isPillProgress = floatingNavBarEnabled,
+                            onClick = {
+                                expandSheet()
+                            },
+                            onVerticalDrag = { deltaY -> onDrag(deltaY) },
+                            onVerticalDragEnd = { velocityY -> onDragEnd(velocityY, startedExpanded = false) },
+                            dragProgress = progress,
+                            modifier = Modifier.fillMaxSize()
+                        )
                     }
                 }
             }

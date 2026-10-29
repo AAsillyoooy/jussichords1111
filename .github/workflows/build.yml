@@ -73,15 +73,6 @@ jobs:
           fi
           echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > release-keystore.jks
 
-      - name: Generate canary keystore
-        if: env.BUILD_TYPE == 'canary'
-        run: |
-          keytool -genkeypair \
-            -keystore canary-keystore.jks -storetype JKS \
-            -storepass jussichords-canary -keypass jussichords-canary \
-            -alias jussichords-canary -keyalg RSA -keysize 2048 -validity 7200 \
-            -dname "CN=Jussichords Canary, OU=CI, O=Jussichords, C=US"
-
       # 修复 Linux 无执行权限
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
